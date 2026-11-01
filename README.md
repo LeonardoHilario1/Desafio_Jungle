@@ -1,82 +1,214 @@
 # Distributed Wagering Processor
 
-Serviço que recebe transações de apostas (BET, WIN, LOSS, REFUND, ROLLBACK) de
-provedores de jogos, atualiza o saldo das carteiras e mantém um ledger imutável. Ele
-continua correto com mensagens repetidas, fora de ordem, simultâneas e com várias
-instâncias rodando.
+Serviço financeiro que recebe transações de apostas de provedores de jogos (BET, WIN,
+LOSS, REFUND e ROLLBACK), atualiza o saldo das carteiras e mantém um ledger imutável.
 
-- **Decisões, trade-offs, limitações e a conferência das restrições do SPEC:**
-  [ARCHITECTURE.md](ARCHITECTURE.md).
-- **Escopo original:** [SPEC.md](SPEC.md) (Etapas 1 a 7). Da Etapa 8 em diante, o
-  contrato segue o enunciado completo do desafio.
+Ele continua correto quando as mensagens chegam **repetidas**, **fora de ordem** ou
+**ao mesmo tempo**, e com **várias instâncias** da aplicação rodando juntas.
+
+Desenvolvido para o desafio técnico da Jungle Gaming.
+
+## Destaques
+
+- **Dinheiro sem `number`:** valores em centavos (`bigint`) no código e `numeric(18,2)`
+  no banco, sempre trafegando como string (`"25.00"`).
+- **Sem saldo negativo nem débito duplicado:** lock por carteira (`SELECT ... FOR UPDATE`)
+  e `CHECK (balance >= 0)` no banco.
+- **Idempotência persistente:** `Idempotency-Key` e `payloadHash` gravados no banco; a
+  mesma requisição devolve a mesma resposta, e o mesmo id com outro conteúdo é conflito.
+- **Ledger auditável:** todo movimento gera um lançamento com saldo antes e depois; o
+  banco impede alterar ou apagar lançamentos.
+- **Eventos só depois do commit:** padrão outbox transacional publicando no SQS.
+- **Testado de verdade:** PostgreSQL e LocalStack reais, com três instâncias disputando a
+  mesma carteira.
 
 ## Stack
 
 Bun 1.4 · TypeScript (strict) · NestJS 12 · MikroORM 7 · PostgreSQL 16 ·
-SQS via LocalStack 4.4 · Docker Compose.
+SQS via LocalStack 4.4 · Docker Compose
 
-## Subir tudo
+## Como rodar
 
 Pré-requisito: Docker.
 
 ```bash
+git clone https://github.com/LeonardoHilario1/Desafio_Jungle.git
+cd Desafio_Jungle
 docker compose up -d --build
 curl localhost:3000/health/ready
 ```
 
 A subida segue esta ordem:
 
-1. `postgres` e `localstack` ficam saudáveis. O script de init do LocalStack cria a
-   fila `wagering-events`.
+1. `postgres` e `localstack` ficam saudáveis (o LocalStack cria a fila `wagering-events`).
 2. `migrate` aplica as migrations e termina.
-3. Só então o `app` sobe, na porta 3000.
+3. `app` sobe na porta 3000.
 
-## Usando a API
+Para parar: `docker compose down` (ou `docker compose down -v` para apagar também os
+dados).
 
-| Método | Rota | Descrição |
-| --- | --- | --- |
-| GET | `/health/live` | 200 enquanto o processo está de pé |
-| GET | `/health/ready` | 200 se PostgreSQL e fila SQS respondem; 503 com o detalhe |
-| POST | `/wallets` | cria carteira: `playerId` e `initialBalance: { amount, currency }` |
-| GET | `/wallets/:walletId` | carteira e saldo |
-| POST | `/wagering/transactions` | BET, WIN, LOSS, REFUND, ROLLBACK; header `Idempotency-Key` obrigatório |
-| GET | `/wagering/transactions/:transactionId` | transação pelo id interno |
-| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | transação pelo id do provedor |
+## Exemplos de uso
+
+Criar uma carteira com saldo inicial:
 
 ```bash
-# carteira com saldo inicial (gera a transação interna OPENING)
-curl -s -X POST localhost:3000/wallets -H 'content-type: application/json'   -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
-
-# aposta (repetir com a mesma Idempotency-Key devolve a mesma resposta, sem debitar de novo)
-curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json'   -H 'Idempotency-Key: provider-a:transaction-123'   -d '{"providerId":"provider-a","externalTransactionId":"transaction-123",
-       "playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<id>",
-       "roundId":"round-987","gameId":"fortune-chimp","kind":"BET",
-       "money":{"amount":"25.00","currency":"BRL"}}'
-# → {"transactionId":"...","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":false}
-
-# reembolso da aposta, referenciada pelo id dela no provedor
-curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json'   -H 'Idempotency-Key: provider-a:refund-1'   -d '{"providerId":"provider-a","externalTransactionId":"refund-1",
-       "playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<id>",
-       "roundId":"round-987","gameId":"fortune-chimp","kind":"REFUND",
-       "money":{"amount":"25.00","currency":"BRL"},"referenceExternalTransactionId":"transaction-123"}'
+curl -s -X POST localhost:3000/wallets \
+  -H 'content-type: application/json' \
+  -d '{
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "initialBalance": { "amount": "1000.00", "currency": "BRL" }
+  }'
 ```
 
-- **Valores monetários** são sempre `{ "amount": "<string>", "currency": "BRL" }`, com até
-  2 casas. Um `amount` numérico é rejeitado.
-- **Respostas:** 201 (processada), 202 (aguardando a referência), 422 (recusada por
-  regra de negócio, com `failureCode`), 409 (mesma chave com outro payload, ou mesmo id
-  externo com outra chave) e 503 (carteira ocupada; repetir com a mesma chave). A tabela
-  completa está no [ARCHITECTURE.md](ARCHITECTURE.md#status-http), e os códigos de falha
-  em [Códigos de falha](ARCHITECTURE.md#códigos-de-falha).
-- **`X-Correlation-Id`** (opcional) é gravado na transação e propagado aos eventos.
+Fazer uma aposta (troque `<walletId>` pelo `id` devolvido acima):
 
-Para ver os eventos publicados no SQS:
+```bash
+curl -s -X POST localhost:3000/wagering/transactions \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: provider-a:transaction-123' \
+  -d '{
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-123",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "walletId": "<walletId>",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": { "amount": "25.00", "currency": "BRL" }
+  }'
+```
+
+Resposta:
+
+```json
+{
+  "transactionId": "0192f298-345e-7e38-af88-e43f851a819d",
+  "status": "PROCESSED",
+  "balance": { "amount": "975.00", "currency": "BRL" },
+  "idempotentReplay": false
+}
+```
+
+Enviar o mesmo comando de novo devolve a mesma resposta com `"idempotentReplay": true`,
+sem debitar outra vez.
+
+Reembolsar a aposta (a referência é o id da aposta no provedor):
+
+```bash
+curl -s -X POST localhost:3000/wagering/transactions \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: provider-a:refund-1' \
+  -d '{
+    "providerId": "provider-a",
+    "externalTransactionId": "refund-1",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "walletId": "<walletId>",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "REFUND",
+    "money": { "amount": "25.00", "currency": "BRL" },
+    "referenceExternalTransactionId": "transaction-123"
+  }'
+```
+
+Ver os eventos publicados no SQS:
 
 ```bash
 docker compose exec localstack awslocal sqs receive-message \
   --queue-url http://localhost:4566/000000000000/wagering-events \
   --message-attribute-names All --max-number-of-messages 10
 ```
+
+## Endpoints
+
+| Método | Rota | Descrição |
+| --- | --- | --- |
+| GET | `/health/live` | processo vivo |
+| GET | `/health/ready` | PostgreSQL e SQS alcançáveis (503 se não) |
+| POST | `/wallets` | cria carteira com `playerId` e `initialBalance` |
+| GET | `/wallets/:walletId` | carteira e saldo |
+| POST | `/wagering/transactions` | envia BET, WIN, LOSS, REFUND ou ROLLBACK (`Idempotency-Key` obrigatório) |
+| GET | `/wagering/transactions/:transactionId` | transação pelo id interno |
+| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | transação pelo id do provedor |
+
+**Status HTTP:**
+
+| Status | Quando |
+| --- | --- |
+| 201 | transação processada |
+| 202 | aceita, aguardando a transação referenciada |
+| 400 | payload inválido |
+| 404 | carteira ou transação não encontrada |
+| 409 | mesma `Idempotency-Key` com outro conteúdo, ou carteira duplicada |
+| 422 | recusada por regra de negócio (o corpo traz o `failureCode`) |
+| 503 | carteira ocupada; pode repetir com a mesma chave |
+
+## Regras de negócio
+
+| Tipo | Efeito no saldo | Regra principal |
+| --- | --- | --- |
+| BET | débito | recusada se o saldo não cobrir (`INSUFFICIENT_FUNDS`) |
+| WIN | crédito | pode referenciar a BET da mesma rodada |
+| LOSS | nenhum | registra o resultado sem mexer no saldo |
+| REFUND | crédito | devolve uma BET processada, uma única vez |
+| ROLLBACK | inverso da referência | desfaz uma BET, WIN ou REFUND processada, uma única vez |
+
+- **Referência que ainda não chegou:** a transação fica `PENDING_REFERENCE`, sem mexer no
+  saldo.
+- **Reversão que deixaria o saldo negativo:** é recusada com
+  `REVERSAL_INSUFFICIENT_FUNDS`, um código diferente do de aposta sem saldo.
+
+Todos os códigos de falha estão no
+[ARCHITECTURE.md](ARCHITECTURE.md#códigos-de-falha).
+
+## Arquitetura
+
+```
+provedor ──HTTP──▶ NestJS (N instâncias)
+                     │ uma transação SQL por operação:
+                     │ lock da carteira → idempotência → regras → saldo + ledger + outbox
+                     ▼
+                  PostgreSQL ◀── publisher da outbox (em cada instância)
+                                        │
+                                        ▼
+                                   SQS (LocalStack)
+```
+
+| Pasta | Conteúdo |
+| --- | --- |
+| `src/dominio` | regras de negócio puras: `Money`, `Wallet`, `WagerTransaction`, ledger, eventos |
+| `src/aplicacao` | casos de uso (abrir carteira, processar transação, consultas) |
+| `src/persistencia` | MikroORM, conversão banco ↔ domínio |
+| `src/migracoes` | migrations SQL com as constraints e triggers |
+| `src/carteiras`, `src/apostas` | controllers HTTP |
+| `src/outbox` | publicação dos eventos no SQS |
+
+As decisões, os trade-offs e as limitações estão explicados no
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Testes
+
+Os testes de integração usam o PostgreSQL e o LocalStack reais do Compose, num banco
+separado (`wagering_test`), sem mock do banco.
+
+```bash
+bun install
+docker compose up -d postgres localstack
+bun test                     # 244 testes
+bun run test:concurrency     # testes de concorrência repetidos 20 vezes
+```
+
+O que é testado:
+
+- **Unidade:** `Money`, carteira, ledger e as regras de cada tipo de transação.
+- **Banco:** cada constraint e trigger do schema; migrations indo e voltando.
+- **API:** contrato, status HTTP, idempotência, REFUND e ROLLBACK.
+- **Concorrência:** três instâncias da aplicação ao mesmo tempo, incluindo o cenário do
+  desafio (saldo 100.00 e duas apostas de 80.00 simultâneas: uma passa, a outra é
+  recusada, saldo final 20.00).
+
+Ao fim de cada cenário, os testes conferem no banco que o saldo de cada carteira é igual à
+soma do ledger.
 
 ## Desenvolvimento local
 
@@ -93,107 +225,107 @@ bun run start
 | Comando | O que faz |
 | --- | --- |
 | `bun run start` | sobe a aplicação |
-| `bun run typecheck` | `tsc --noEmit` com TypeScript strict |
-| `bun test` | todos os testes (unitários e de integração) |
+| `bun run typecheck` | checagem de tipos (TypeScript strict) |
+| `bun test` | todos os testes |
 | `bun run test:unit` | só os unitários (não precisam de Docker) |
 | `bun run test:integration` | só os de integração |
-| `bun run test:concurrency` | testes de concorrência repetidos 20 vezes |
-| `bun run migration:up` | aplica as migrations pendentes |
+| `bun run test:concurrency` | concorrência, 20 vezes |
+| `bun run migration:up` | aplica as migrations |
 | `bun run migration:down` | reverte a última migration (recusa se houver dados financeiros) |
 
-### Variáveis de ambiente
+**Variáveis de ambiente:**
 
 | Variável | Obrigatória | Padrão | Descrição |
 | --- | --- | --- | --- |
 | `PORT` | sim | | porta HTTP |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | sim | | PostgreSQL |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | sim | | credenciais SQS (`test`/`test` no LocalStack) |
-| `SQS_ENDPOINT` | sim | | endpoint do SQS (LocalStack) |
+| `SQS_ENDPOINT` | sim | | endpoint do SQS |
 | `SQS_OUTBOX_QUEUE_NAME` | sim | | fila dos eventos |
-| `OUTBOX_PUBLISHER_ENABLED` | não | `true` | liga o publisher do outbox nesta instância |
-| `OUTBOX_POLL_INTERVAL_MS` | não | `500` | intervalo do publisher quando não há lote cheio |
+| `OUTBOX_PUBLISHER_ENABLED` | não | `true` | liga o publisher da outbox nesta instância |
+| `OUTBOX_POLL_INTERVAL_MS` | não | `500` | intervalo entre buscas do publisher |
 
 Se faltar uma variável obrigatória, a aplicação não sobe.
 
-## Testes
+**Banco de testes:** o `wagering_test` é criado na **primeira** subida do volume do
+Postgres. Se o volume já existia, recrie com `docker compose down -v`.
 
-Os testes de integração usam o PostgreSQL e o LocalStack reais do Compose, com um banco
-separado (`wagering_test`), sem mocks do banco.
+## Status do projeto
 
-```bash
-docker compose up -d postgres localstack
-bun test                     # 244 testes
-bun run test:concurrency     # cenários de concorrência, 20 vezes
-```
+**Pronto:**
 
-- **Concorrência:** os testes sobem **três instâncias da aplicação** sobre o mesmo banco
-  e conferem, no fim de cada cenário, que o saldo de cada carteira é igual ao saldo
-  reconstruído pelo ledger, e que o ledger encadeia sem lacunas.
-- **Reset do banco:** as suítes recriam as tabelas do `wagering_test` a cada teste. O
-  reset se recusa a rodar em bancos cujo nome não termina em `_test`.
-- **Criação do `wagering_test`:** é feita por `docker/postgres/init` na **primeira**
-  subida do volume. Se o volume já existia antes desse script, recrie-o com
-  `docker compose down -v`.
-- **Volume criado antes da Etapa 8:** as migrations do domínio foram consolidadas, então
-  o `migrate` falha num banco antigo. Recrie o volume com `docker compose down -v`.
-- **Endereços:** podem ser trocados com `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME` e
-  `TEST_SQS_ENDPOINT`.
+- carteiras, apostas e reversões;
+- idempotência;
+- ledger;
+- outbox;
+- consultas de transação;
+- testes com várias instâncias.
+
+**Próximos passos:**
+
+- ledger paginado (`GET /wallets/:id/ledger`) e reconciliação de saldo;
+- consumidor da fila `wager-transactions.fifo`, com inbox e DLQ;
+- reprocessamento automático das transações `PENDING_REFERENCE`;
+- logs estruturados e métricas.
+
+Autenticação ficou fora do escopo. O desenho previsto, com um Identity Provider externo,
+está no [ARCHITECTURE.md](ARCHITECTURE.md#autenticação-desenho-não-implementado).
 
 ## Uso de IA
 
-A implementação foi feita com apoio do **Claude Code** (Anthropic), etapa por etapa,
-seguindo o `SPEC.md`. Ao fim de cada etapa a IA rodava os testes, explicava o que tinha
-feito e por quê, e esperava a confirmação para seguir.
+O projeto foi construído com apoio do **Claude Code** (Anthropic), em etapas. A cada etapa
+a IA implementava, rodava os testes e explicava o que tinha feito. Eu revisava a etapa e
+só então autorizava a seguinte.
 
-**Decidido por mim**
+**Decidido por mim:**
 
-- **No `SPEC.md`:** stack, restrições invioláveis, lock pessimista por carteira com
-  `CHECK (balance >= 0)` e `version`, idempotência por `Idempotency-Key` e `payloadHash`,
-  outbox transacional, estados e `failureCode`, escopo do MVP e ordem das etapas.
-- **Durante a implementação:** o saldo inicial como lançamento de abertura no ledger. A
-  IA identificou que o SPEC não definia como a carteira recebe saldo e apresentou três
-  opções; escolhi esta.
-- **Depois da Etapa 7:** comparar a entrega com o enunciado completo do desafio e
-  alinhar contrato, regras (REFUND/ROLLBACK), mensageria e observabilidade a ele.
+- **No [SPEC.md](SPEC.md):** stack, restrições, estratégia de lock por carteira,
+  idempotência por `Idempotency-Key`, outbox e escopo inicial.
+- **Saldo inicial:** como lançamento de abertura no ledger, escolhido entre as opções que
+  a IA apresentou.
+- **Alinhamento ao enunciado:** levar a entrega até o enunciado completo do desafio,
+  depois do MVP.
+- **Ajustes de forma:** nomes de pastas e arquivos em português e comentários num tom
+  mais direto.
 
-**Gerado pela IA**
+**Gerado pela IA:**
 
-- **Código:** todo o código, as migrations, os testes, o Docker Compose e estes
-  documentos.
-- **Decisões de detalhe:** a forma de BET/WIN/LOSS, os status HTTP, o tratamento de
-  erros e o desenho do publisher. Estão registradas no `ARCHITECTURE.md`
-  ([Quem decidiu o quê](ARCHITECTURE.md#quem-decidiu-o-quê)).
-- **APIs das bibliotecas:** a IA consultou as definições de tipo das versões instaladas
-  (MikroORM 7, NestJS 12, AWS SDK v3) antes de usá-las. Foi assim que encontrou, por
-  exemplo, que o MikroORM 7 não lê mais `design:type` e que o Migrator não usa advisory
-  lock.
+- **Código:** o código, as migrations, os testes, o Docker Compose e a documentação.
+- **Decisões de detalhe:** registradas em
+  [Quem decidiu o quê](ARCHITECTURE.md#quem-decidiu-o-quê).
 
-**Erros da IA durante o processo, registrados por transparência**
+**Erros da IA durante o processo:**
 
-- **Etapa 2:** fez um commit com testes de integração falhando, porque o encadeamento de
-  comandos checava o código de saída errado. A causa das falhas era o Docker parado, não
-  o código. Os testes foram rodados de novo sem mudança de arquivo e, dali em diante, o
-  commit só acontecia se `bun test` passasse.
-- **Etapa 3:** afirmou que a API pública do domínio não mudaria, mas ela mudou
-  (`wallet.balance` virou `wallet.balance()`). A correção foi informada no resumo da
-  etapa.
-- **Etapa 8:** a validação de `money` procurava a chave errada (`initialBalance.amount`
-  em vez de `amount`) e recusava todo valor bem formado. Os testes de integração da API
-  pegaram o erro antes do commit.
+- Um commit feito com testes falhando (o Docker estava parado). Depois disso, todo commit
+  passou a exigir a suíte verde.
+- Uma afirmação errada sobre a API do domínio, corrigida no resumo da etapa.
+- Um bug na validação de `money`, pego pelos testes de integração antes do commit.
 
-**Verificação feita pela IA**
+**Verificação feita pela IA:**
 
-- **Testes:** typecheck e suíte completa antes de cada commit. Testes de concorrência
-  repetidos 20 vezes.
-- **Teste de mutação:** sem o `FOR UPDATE`, os testes de concorrência falham (13 de 16
-  na Etapa 8).
-- **Ponta a ponta:** cada etapa testada na stack do Compose.
-- **Restrições:** auditoria por busca (uso de `number` em dinheiro, caches em memória,
-  locks).
+- **Testes:** typecheck e suíte completa antes de cada commit; concorrência repetida 20
+  vezes.
+- **Teste de mutação:** sem o `FOR UPDATE`, os testes de concorrência falham, o que mostra
+  que eles pegam o problema.
 
-**Revisado e testado por mim**
+**Revisado e testado por mim:**
 
-_A preencher pelo responsável: o que foi revisado, o que foi executado e o que foi
-alterado manualmente._
-#   D e s a f i o _ J u n g l e  
- 
+- **Subida:** subi o projeto do zero com `docker compose up -d --build` e conferi
+  `GET /health/ready` respondendo `ready: true`.
+- **Testes:** rodei `bun test` e `bun run test:concurrency` e vi todos passarem.
+- **API na mão, com `curl`:**
+  - criei uma carteira com saldo inicial;
+  - fiz uma BET e repeti a mesma requisição: veio `idempotentReplay: true` e o saldo não
+    mudou;
+  - mandei uma BET maior que o saldo e recebi 422 `INSUFFICIENT_FUNDS`;
+  - fiz um REFUND da aposta e o saldo voltou ao valor inicial.
+- **Banco:** conferi com `psql` que o saldo da carteira bate com a soma dos lançamentos
+  do ledger.
+- **Código que li e entendi:**
+  - [dinheiro.ts](src/dominio/dinheiro.ts), como o dinheiro é guardado sem `number`;
+  - [regras-aposta.ts](src/dominio/regras-aposta.ts), as regras de cada tipo de
+    transação;
+  - [processar-transacao-aposta.ts](src/aplicacao/processar-transacao-aposta.ts), o
+    fluxo com lock e idempotência.
+- **Alterações manuais:** não alterei código à mão. Os ajustes que quis, pedi à IA e
+  revisei o resultado.
