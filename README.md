@@ -4,8 +4,9 @@ Serviço que processa transações de apostas, atualiza o saldo de carteiras e m
 ledger imutável, continuando correto com entrega at-least-once. As decisões de desenho
 estão em [ARCHITECTURE.md](ARCHITECTURE.md) e o escopo em [SPEC.md](SPEC.md).
 
-> Status: **Etapa 1 (base)** concluída: infraestrutura, health checks e pipeline de
-> migrations. O domínio e a API ainda não foram implementados.
+> Status: **Etapas 1 e 2** concluídas: infraestrutura, health checks, pipeline de
+> migrations e modelo de domínio (`src/domain`) com testes unitários. Schema e API ainda
+> não foram implementados.
 
 ## Stack
 

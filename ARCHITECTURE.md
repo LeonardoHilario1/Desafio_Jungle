@@ -52,7 +52,75 @@ que permite aos testes apontar para o banco de testes sem mexer em `process.env`
 `bun test`. Os de integração usam PostgreSQL e LocalStack reais do Compose, com um banco
 dedicado `wagering_test` (restrição 10).
 
+## Etapa 2: domínio
+
+Classes em `src/domain`, sem dependência de framework, todas com construtor privado e
+factories estáticas. O MikroORM reconstrói entidades lidas do banco com
+`Object.create(prototype)`, sem chamar o construtor, então isso não atrapalha o
+mapeamento (Etapa 3).
+
+### Money
+
+- Guarda centavos em `bigint`. Entrada e saída são strings decimais com escala 2
+  (`"10.50"`); `number` não entra em nenhum ponto.
+- Valida no formato: até 16 dígitos inteiros e 2 decimais (o intervalo de
+  `numeric(18,2)`), sem sinal, expoente, espaços ou zeros à esquerda. `"10"` e `"10.5"`
+  são aceitos e normalizados.
+- **Não negativo.** Subtração com resultado negativo e estouro do intervalo lançam
+  `AMOUNT_OUT_OF_RANGE`.
+- Operações com moedas diferentes lançam `CURRENCY_MISMATCH`.
+- Imutável: `Object.freeze` e operações que devolvem nova instância.
+- Moeda: código ISO 4217 de 3 letras maiúsculas, sempre com escala 2. Moedas com outra
+  escala (JPY, BHD) ficam fora do MVP.
+
+### Wallet
+
+- O saldo só muda por `debit` e `credit`. Cada um valida moeda e saldo, incrementa
+  `version` e **devolve o `WalletLedgerEntry` correspondente**. Toda mudança de saldo
+  tem exatamente um lançamento, por construção.
+- A exclusão mútua entre requisições concorrentes não é papel da classe; fica com o
+  `SELECT ... FOR UPDATE` na Etapa 4.
+
+### WalletLedgerEntry
+
+Todos os campos são `readonly`. Guarda `amount` e `balanceAfter`, o que permite
+reconstruir e conferir o saldo pelo ledger.
+
+### WagerTransaction
+
+**Decisão de domínio (o SPEC não detalha o payload):**
+
+| Tipo | Valor   | `referenceKey`                         | Efeito no saldo |
+| ---- | ------- | -------------------------------------- | --------------- |
+| BET  | > 0     | proibida                               | débito          |
+| WIN  | > 0     | obrigatória: chave de idempotência da BET | crédito      |
+| LOSS | `0.00`  | obrigatória: chave de idempotência da BET | nenhum (só liquida a aposta) |
+
+- A referência usa a **chave de idempotência da BET**, porque é o identificador que o
+  provedor conhece. Nossos UUIDs ele não conhece.
+- Se a BET referenciada ainda não chegou (entrega fora de ordem), a WIN/LOSS fica em
+  `PENDING_REFERENCE`. O reprocessamento com backoff está fora do escopo.
+- `linkReference(bet)` valida o vínculo e devolve um `failureCode` quando ele é
+  inválido: a referência não é BET, é de outra carteira, de outra moeda, ou a BET não
+  foi processada. A regra "uma BET só é liquidada uma vez" depende de outras linhas,
+  então fica com um índice único parcial no banco (Etapa 3).
+- **Estados.** PENDING pode ir para qualquer outro. PENDING_REFERENCE (só WIN/LOSS) pode
+  ir para PROCESSED, REJECTED ou FAILED. Os terminais não mudam mais. WIN/LOSS só vira
+  PROCESSED depois de vinculada à BET.
+- **`payloadHash`.** SHA-256 do JSON canônico (chaves ordenadas) de `walletId`, `type`,
+  `amount` normalizado, `currency` e `referenceKey`. A chave de idempotência fica de fora,
+  porque é a identidade da requisição, não o conteúdo. Como o valor entra normalizado,
+  `"10"` e `"10.00"` geram o mesmo hash.
+
+### Erros
+
+`DomainError` sempre carrega um `code` estável. Os códigos em `FAILURE_CODES` podem ser
+gravados como `failureCode` de uma transação; os demais (`INVALID_AMOUNT`,
+`INVALID_TRANSACTION`, ...) indicam entrada inválida e viram 4xx na API.
+
 ## Limitações conhecidas (até aqui)
+
+- Todas as moedas usam escala 2.
 
 - O Migrator do MikroORM 7.2 não usa advisory lock (conferido no código do pacote), então
   duas execuções simultâneas do `migrate` não são seguras. O Compose roda uma única
