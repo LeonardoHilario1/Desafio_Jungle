@@ -6,8 +6,8 @@ import {
   SQSClient,
   type Message,
 } from '@aws-sdk/client-sqs';
-import { createApp } from '../../src/app';
-import { OutboxPublisher } from '../../src/outbox/outbox-publisher';
+import { createApp } from '../../src/aplicacao';
+import { OutboxPublisher } from '../../src/outbox/publicador-outbox';
 import { startApi, type TestApi } from '../support/api';
 import { expectSqlState, resetDatabase } from '../support/database';
 import { testConfig } from '../support/test-config';

@@ -49,7 +49,7 @@ services:
 
   migrate:
     build: .
-    command: ["bun", "src/migrate.ts", "up"]
+    command: ["bun", "src/migrar.ts", "up"]
     environment: *app-env
     depends_on:
       postgres:

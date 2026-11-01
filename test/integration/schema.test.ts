@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
-import { ProcessWagerTransaction, type WagerTransactionCommand } from '../../src/application/process-wager-transaction';
-import { Money } from '../../src/domain/money';
-import { Wallet } from '../../src/domain/wallet';
-import { MikroOrmWageringUnitOfWork } from '../../src/persistence/mikro-orm-wagering-store';
+import { ProcessWagerTransaction, type WagerTransactionCommand } from '../../src/aplicacao/processar-transacao-aposta';
+import { Money } from '../../src/dominio/dinheiro';
+import { Wallet } from '../../src/dominio/carteira';
+import { MikroOrmWageringUnitOfWork } from '../../src/persistencia/repositorio-apostas-mikro-orm';
 import { expectSqlState, initTestOrm, resetDatabase } from '../support/database';
 
 // SQLSTATEs do PostgreSQL usados nas asserções.

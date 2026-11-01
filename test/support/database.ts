@@ -1,7 +1,7 @@
 import { expect } from 'bun:test';
 import type { Migrator } from '@mikro-orm/migrations';
 import { MikroORM } from '@mikro-orm/postgresql';
-import { ormOptions } from '../../src/mikro-orm.config';
+import { ormOptions } from '../../src/configuracao-orm';
 import { testConfig } from './test-config';
 
 export async function initTestOrm(): Promise<MikroORM> {

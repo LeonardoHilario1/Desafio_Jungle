@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { InvalidTransactionStateError } from '../../../src/domain/domain-error';
-import { Money } from '../../../src/domain/money';
-import { applyWager, type ReferenceContext } from '../../../src/domain/wager-rules';
-import { WagerTransaction, type CreateWagerTransactionProps } from '../../../src/domain/wager-transaction';
-import { Wallet } from '../../../src/domain/wallet';
+import { InvalidTransactionStateError } from '../../../src/dominio/erro-dominio';
+import { Money } from '../../../src/dominio/dinheiro';
+import { applyWager, type ReferenceContext } from '../../../src/dominio/regras-aposta';
+import { WagerTransaction, type CreateWagerTransactionProps } from '../../../src/dominio/transacao-aposta';
+import { Wallet } from '../../../src/dominio/carteira';
 import { brl, txProps } from '../../support/domain';
 
 let seq = 0;

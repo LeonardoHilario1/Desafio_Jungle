@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { InvalidTransactionStateError } from '../../../src/domain/domain-error';
-import { Money } from '../../../src/domain/money';
-import { WagerTransaction, type CreateWagerTransactionProps } from '../../../src/domain/wager-transaction';
+import { InvalidTransactionStateError } from '../../../src/dominio/erro-dominio';
+import { Money } from '../../../src/dominio/dinheiro';
+import { WagerTransaction, type CreateWagerTransactionProps } from '../../../src/dominio/transacao-aposta';
 import { brl, errorCode, txProps as props } from '../../support/domain';
 
 

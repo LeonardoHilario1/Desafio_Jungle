@@ -10,4 +10,4 @@ COPY src ./src
 
 USER bun
 EXPOSE 3000
-CMD ["bun", "src/main.ts"]
+CMD ["bun", "src/principal.ts"]

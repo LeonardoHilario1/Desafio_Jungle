@@ -43,26 +43,30 @@ provedor ──HTTP──▶ NestJS (N instâncias) ──▶ ProcessWagerTransa
 - **Nenhum evento sai antes do commit:** ele é gravado na mesma transação e só depois
   publicado.
 
+Os nomes de pastas e arquivos em `src` estão em português. Os identificadores no código
+(classes, métodos, campos) continuam em inglês, iguais aos do enunciado do desafio
+(`Money`, `Wallet`, `WagerTransaction`...), para facilitar a comparação.
+
 | Pasta | Conteúdo |
 | --- | --- |
-| `src/domain` | `Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`, regras (`wager-rules.ts`), eventos de integração, `OutboxMessage`. Sem dependência de ORM nem de NestJS. |
-| `src/application` | casos de uso (`ProcessWagerTransaction`, `OpenWallet`, `WageringQueries`), a porta `WageringStore`/`WageringUnitOfWork` e os erros de aplicação |
-| `src/persistence` | records do MikroORM (`EntitySchema`), mappers record ↔ domínio, implementação da porta, tradução de erros do banco |
-| `src/migrations` | migrations SQL versionadas e reversíveis |
-| `src/wallets`, `src/wagering` | controllers e presenters HTTP |
+| `src/dominio` | `Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`, regras (`regras-aposta.ts`), eventos de integração, `OutboxMessage`. Sem dependência de ORM nem de NestJS. |
+| `src/aplicacao` | casos de uso (`ProcessWagerTransaction`, `OpenWallet`, `WageringQueries`), a porta `WageringStore`/`WageringUnitOfWork` e os erros de aplicação |
+| `src/persistencia` | records do MikroORM (`EntitySchema`), mappers record ↔ domínio, implementação da porta, tradução de erros do banco |
+| `src/migracoes` | migrations SQL versionadas e reversíveis |
+| `src/carteiras`, `src/apostas` | controllers e presenters HTTP |
 | `src/outbox` | publisher e worker |
-| `src/api`, `src/auth`, `src/health` | validação de entrada e filtro de erros, guard de autenticação, health checks |
+| `src/api`, `src/autenticacao`, `src/saude` | validação de entrada e filtro de erros, guard de autenticação, health checks |
 
 ## Conformidade com as restrições invioláveis
 
 | # | Restrição | Como é atendida | Evidência |
 | --- | --- | --- | --- |
-| 1 | Nada de `number`/`float`/`double` para dinheiro | `Money` guarda centavos em `bigint`; entrada e saída em string de escala 2. Colunas `numeric(18,2)` lidas e gravadas como string. A API rejeita `amount` numérico. | `money.ts`, `mappers.ts`. Testes: `money.test.ts`, `wagering-api.test.ts` ("money numérico"). |
-| 2 | Idempotência não fica em memória | Chave e `payloadHash` em `wager_transactions`, com `UNIQUE (idempotency_key)`; busca no banco sob o lock da carteira. | `process-wager-transaction.ts`; replay entre **3 instâncias** em `concurrency.test.ts` |
-| 3 | Não confiar só em SQS FIFO | A fila de eventos é padrão. A consistência vem do banco; o evento leva `eventId` determinístico (deduplicação) e `walletVersion` (ordenação). | `integration-event.ts` |
+| 1 | Nada de `number`/`float`/`double` para dinheiro | `Money` guarda centavos em `bigint`; entrada e saída em string de escala 2. Colunas `numeric(18,2)` lidas e gravadas como string. A API rejeita `amount` numérico. | `dinheiro.ts`, `mapeadores.ts`. Testes: `money.test.ts`, `wagering-api.test.ts` ("money numérico"). |
+| 2 | Idempotência não fica em memória | Chave e `payloadHash` em `wager_transactions`, com `UNIQUE (idempotency_key)`; busca no banco sob o lock da carteira. | `processar-transacao-aposta.ts`; replay entre **3 instâncias** em `concurrency.test.ts` |
+| 3 | Não confiar só em SQS FIFO | A fila de eventos é padrão. A consistência vem do banco; o evento leva `eventId` determinístico (deduplicação) e `walletVersion` (ordenação). | `evento-integracao.ts` |
 | 4 | Não publicar antes do commit | Outbox gravada na mesma transação; o publisher só lê linhas commitadas. | "não publica mensagem de transação ainda não commitada" (`outbox.test.ts`) |
 | 5 | Ledger nunca sobrescrito nem excluído | Trigger bloqueia `UPDATE`, `DELETE` e `TRUNCATE`; o `down` recusa rodar com lançamentos. | `Migration20261102010000_ledger.ts`; `schema.test.ts`, `migrations.test.ts` |
-| 6 | Sem lock global | `SELECT ... FOR UPDATE` só na linha da carteira; nenhum advisory lock nem `LOCK TABLE`. | `mikro-orm-wagering-store.ts` |
+| 6 | Sem lock global | `SELECT ... FOR UPDATE` só na linha da carteira; nenhum advisory lock nem `LOCK TABLE`. | `repositorio-apostas-mikro-orm.ts` |
 | 7 | Sem ler → calcular → gravar sem controle | Saldo lido com `FOR UPDATE` na mesma transação da escrita; `CHECK (balance >= 0)` e `UNIQUE (wallet_id, wallet_version)` no ledger como redes. | Sem o lock, 13 dos 16 testes de concorrência falham |
 | 8 | Correto com várias instâncias | Nada de estado no processo. Os testes de concorrência sobem **três** aplicações com pools separados; a outbox usa `SKIP LOCKED`. | `concurrency.test.ts`; 4 publishers em `outbox.test.ts` |
 | 9 | Garantias no schema | `UNIQUE`, `CHECK`, FKs compostas, índices únicos parciais e triggers. | [Schema](#schema-e-garantias-no-banco); um teste por constraint em `schema.test.ts` |
@@ -74,7 +78,7 @@ provedor ──HTTP──▶ NestJS (N instâncias) ──▶ ProcessWagerTransa
 - **Domínio separado da persistência.** O MikroORM mapeia *records* (`WalletRecord`,
   `WagerTransactionRecord`, `LedgerEntryRecord`, `OutboxMessageRecord`), classes
   simples espelhando as tabelas, com `EntitySchema` sem decorators e `type` +
-  `columnType` explícitos em toda coluna. Os mappers (`persistence/mappers.ts`) convertem
+  `columnType` explícitos em toda coluna. Os mappers (`persistencia/mapeadores.ts`) convertem
   record → domínio pelas factories `rehydrate` e domínio → record copiando o estado para o
   record gerenciado; o Unit of Work gera o `UPDATE`.
   - **Por quê:** `Money` ocupa duas colunas (valor e moeda) e o domínio expõe estado só
@@ -154,7 +158,7 @@ commitado: a transação é gravada já no estado decidido.
 
 ## Regras de negócio
 
-As regras ficam em `applyWager` (`src/domain/wager-rules.ts`), uma função pura: recebe a
+As regras ficam em `applyWager` (`src/dominio/regras-aposta.ts`), uma função pura: recebe a
 carteira travada, a transação e o que foi lido do banco (a referência e se ela já foi
 revertida), decide e executa a transição.
 
@@ -196,7 +200,7 @@ Ordem das verificações:
 
 ## Códigos de falha
 
-Toda rejeição carrega um `failureCode` estável (`FAILURE_CODES` em `domain-error.ts`).
+Toda rejeição carrega um `failureCode` estável (`FAILURE_CODES` em `erro-dominio.ts`).
 A coluna "provedor" diz o que fazer.
 
 | `failureCode` | Situação | Provedor |
@@ -259,8 +263,8 @@ Migrations SQL escritas à mão, todas com `down`:
 
 | Migration | Conteúdo |
 | --- | --- |
-| `Migration20261031000000_baseline` | fuso do banco em UTC |
-| `Migration20261102000000_wallets_and_transactions` | carteiras e transações, constraints e trigger de imutabilidade |
+| `Migration20261031000000_base` | fuso do banco em UTC |
+| `Migration20261102000000_carteiras_e_transacoes` | carteiras e transações, constraints e trigger de imutabilidade |
 | `Migration20261102010000_ledger` | ledger, aritmética, triggers |
 | `Migration20261102020000_outbox` | outbox |
 
@@ -328,7 +332,7 @@ O mapeamento é o mesmo em todos os endpoints:
 - **Replay reproduz a resposta original:** status e corpo derivam só do estado gravado,
   incluindo o saldo observado naquele momento.
 - **Formato dos erros:** `{ "error": { "code", "message", "details"? } }`.
-- **Validação manual** (`src/api/request.ts`): tipo de cada campo, `money` como objeto de
+- **Validação manual** (`src/api/requisicao.ts`): tipo de cada campo, `money` como objeto de
   strings e rejeição de campos desconhecidos. As regras de valor ficam no domínio.
 
 ## Eventos e outbox
@@ -369,7 +373,7 @@ O mapeamento é o mesmo em todos os endpoints:
 - **Migrations nunca rodam na subida da aplicação:** com várias instâncias, todas
   tentariam migrar ao mesmo tempo.
 - **LocalStack fixado em 4.4:** versões mais novas exigem token de conta.
-- **Configuração** validada na subida (`src/config.ts`); `AppModule.register(config)`
+- **Configuração** validada na subida (`src/configuracao.ts`); `AppModule.register(config)`
   permite aos testes montar várias instâncias.
 
 ## Testes
@@ -406,7 +410,7 @@ verificação detecta uma divergência real.
 
 ## Autenticação (desenho, não implementado)
 
-O `AuthGuard` (`src/auth/auth.guard.ts`) não restringe nada; está aplicado aos controllers
+O `AuthGuard` (`src/autenticacao/guarda-autenticacao.ts`) não restringe nada; está aplicado aos controllers
 de carteira e de apostas como ponto de extensão. Health fica aberto.
 
 Desenho previsto com um IdP externo (Keycloak ou Zitadel no Compose):

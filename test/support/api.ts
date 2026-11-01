@@ -1,6 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { MikroORM } from '@mikro-orm/postgresql';
-import { createApp } from '../../src/app';
+import { createApp } from '../../src/aplicacao';
 import { testConfig } from './test-config';
 
 export interface ApiResponse<T = any> {

@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
-import { Money } from '../../src/domain/money';
-import { Wallet } from '../../src/domain/wallet';
-import { migrations } from '../../src/migrations';
-import { MikroOrmWageringUnitOfWork } from '../../src/persistence/mikro-orm-wagering-store';
+import { Money } from '../../src/dominio/dinheiro';
+import { Wallet } from '../../src/dominio/carteira';
+import { migrations } from '../../src/migracoes';
+import { MikroOrmWageringUnitOfWork } from '../../src/persistencia/repositorio-apostas-mikro-orm';
 import { initTestOrm, resetDatabase } from '../support/database';
 
 let orm: MikroORM;

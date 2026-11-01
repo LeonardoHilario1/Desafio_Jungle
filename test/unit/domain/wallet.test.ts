@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { Money } from '../../../src/domain/money';
-import { Wallet } from '../../../src/domain/wallet';
-import { WalletLedgerEntry } from '../../../src/domain/wallet-ledger-entry';
+import { Money } from '../../../src/dominio/dinheiro';
+import { Wallet } from '../../../src/dominio/carteira';
+import { WalletLedgerEntry } from '../../../src/dominio/lancamento-ledger';
 import { brl, errorCode } from '../../support/domain';
 
 const open = (amount = '100.00') => Wallet.open({ playerId: 'player-1', initialBalance: brl(amount) });

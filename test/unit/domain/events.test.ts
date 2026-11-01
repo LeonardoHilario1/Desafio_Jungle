@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { deterministicEventId } from '../../../src/domain/events/integration-event';
-import { eventsFor, WalletBalanceChanged } from '../../../src/domain/events/wagering-events';
-import { OutboxMessage } from '../../../src/domain/outbox-message';
-import { applyWager } from '../../../src/domain/wager-rules';
-import { WagerTransaction } from '../../../src/domain/wager-transaction';
-import { Wallet } from '../../../src/domain/wallet';
+import { deterministicEventId } from '../../../src/dominio/eventos/evento-integracao';
+import { eventsFor, WalletBalanceChanged } from '../../../src/dominio/eventos/eventos-apostas';
+import { OutboxMessage } from '../../../src/dominio/mensagem-outbox';
+import { applyWager } from '../../../src/dominio/regras-aposta';
+import { WagerTransaction } from '../../../src/dominio/transacao-aposta';
+import { Wallet } from '../../../src/dominio/carteira';
 import { brl, txProps } from '../../support/domain';
 
 const ctx = { correlationId: 'corr-1', causationId: 'provider-a:tx-1' };

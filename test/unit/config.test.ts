@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { loadConfig } from '../../src/config';
+import { loadConfig } from '../../src/configuracao';
 
 const validEnv = {
   PORT: '3000',

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
-import { createApp } from '../../src/app';
-import type { AppConfig } from '../../src/config';
+import { createApp } from '../../src/aplicacao';
+import type { AppConfig } from '../../src/configuracao';
 import { testConfig } from '../support/test-config';
 
 let app: INestApplication | undefined;

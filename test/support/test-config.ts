@@ -1,4 +1,4 @@
-import type { AppConfig } from '../../src/config';
+import type { AppConfig } from '../../src/configuracao';
 
 // Testes de integração usam o PostgreSQL e o LocalStack reais do docker-compose,
 // com um banco separado (wagering_test). Nada de mock do banco.

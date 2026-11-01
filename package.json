@@ -3,9 +3,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun src/main.ts",
-    "migration:up": "bun src/migrate.ts up",
-    "migration:down": "bun src/migrate.ts down",
+    "start": "bun src/principal.ts",
+    "migration:up": "bun src/migrar.ts up",
+    "migration:down": "bun src/migrar.ts down",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:unit": "bun test test/unit",

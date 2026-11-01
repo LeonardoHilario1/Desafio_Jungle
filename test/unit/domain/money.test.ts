@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { Money } from '../../../src/domain/money';
+import { Money } from '../../../src/dominio/dinheiro';
 import { errorCode } from '../../support/domain';
 
 const of = (amount: string, currency: string) => Money.from({ amount, currency });

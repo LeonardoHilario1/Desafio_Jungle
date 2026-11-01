@@ -1,6 +1,6 @@
-import { DomainError } from '../../src/domain/domain-error';
-import { Money } from '../../src/domain/money';
-import type { CreateWagerTransactionProps } from '../../src/domain/wager-transaction';
+import { DomainError } from '../../src/dominio/erro-dominio';
+import { Money } from '../../src/dominio/dinheiro';
+import type { CreateWagerTransactionProps } from '../../src/dominio/transacao-aposta';
 
 /** Código do DomainError lançado por fn, ou undefined se não lançou. */
 export function errorCode(fn: () => unknown): string | undefined {
