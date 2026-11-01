@@ -9,16 +9,19 @@ const MAX_PLAYER_ID_LENGTH = 255;
  * a regra, incrementam version e devolvem o lançamento de ledger correspondente.
  * A exclusão mútua entre requisições concorrentes é feita pelo banco
  * (SELECT ... FOR UPDATE), não por esta classe.
+ *
+ * O estado mutável fica em campos privados com tipos primitivos (o saldo em string
+ * decimal), que é o que o MikroORM persiste; Money é exposto só pelo getter.
  */
 export class Wallet {
   private constructor(
     readonly id: string,
     readonly playerId: string,
     readonly currency: string,
-    private _balance: Money,
-    private _version: number,
+    private balanceAmount: string,
+    private versionNumber: number,
     readonly createdAt: Date,
-    private _updatedAt: Date,
+    private lastUpdatedAt: Date,
   ) {}
 
   static open(params: { playerId: string; currency: string }): Wallet {
@@ -28,36 +31,36 @@ export class Wallet {
     }
     const balance = Money.zero(params.currency);
     const now = new Date();
-    return new Wallet(crypto.randomUUID(), playerId, balance.currency, balance, 1, now, now);
+    return new Wallet(crypto.randomUUID(), playerId, balance.currency, balance.amount, 1, now, now);
   }
 
-  get balance(): Money {
-    return this._balance;
+  balance(): Money {
+    return Money.of(this.balanceAmount, this.currency);
   }
 
-  get version(): number {
-    return this._version;
+  version(): number {
+    return this.versionNumber;
   }
 
-  get updatedAt(): Date {
-    return this._updatedAt;
+  updatedAt(): Date {
+    return this.lastUpdatedAt;
   }
 
   canDebit(amount: Money): boolean {
     this.assertCurrency(amount);
-    return !this._balance.isLessThan(amount);
+    return !this.balance().isLessThan(amount);
   }
 
   debit(amount: Money, transactionId: string): WalletLedgerEntry {
     if (!this.canDebit(amount)) {
-      throw new DomainError('INSUFFICIENT_FUNDS', `Saldo ${this._balance} insuficiente para debitar ${amount}`);
+      throw new DomainError('INSUFFICIENT_FUNDS', `Saldo ${this.balance()} insuficiente para debitar ${amount}`);
     }
-    return this.change('DEBIT', amount, this._balance.subtract(amount), transactionId);
+    return this.change('DEBIT', amount, this.balance().subtract(amount), transactionId);
   }
 
   credit(amount: Money, transactionId: string): WalletLedgerEntry {
     this.assertCurrency(amount);
-    return this.change('CREDIT', amount, this._balance.add(amount), transactionId);
+    return this.change('CREDIT', amount, this.balance().add(amount), transactionId);
   }
 
   private change(
@@ -74,9 +77,9 @@ export class Wallet {
       amount,
       balanceAfter: newBalance,
     });
-    this._balance = newBalance;
-    this._version += 1;
-    this._updatedAt = new Date();
+    this.balanceAmount = newBalance.amount;
+    this.versionNumber += 1;
+    this.lastUpdatedAt = new Date();
     return entry;
   }
 

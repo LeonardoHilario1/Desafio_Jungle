@@ -2,6 +2,7 @@ import { Migrator } from '@mikro-orm/migrations';
 import { defineConfig, PostgreSqlDriver } from '@mikro-orm/postgresql';
 import type { DatabaseConfig } from './config';
 import { migrations } from './migrations';
+import { entitySchemas } from './persistence/entity-schemas';
 
 export function ormOptions(db: DatabaseConfig) {
   return defineConfig({
@@ -11,9 +12,7 @@ export function ormOptions(db: DatabaseConfig) {
     user: db.user,
     password: db.password,
     dbName: db.name,
-    entities: [],
-    // Ainda não há entidades na Etapa 1.
-    discovery: { warnWhenNoEntities: false },
+    entities: entitySchemas,
     extensions: [Migrator],
     migrations: {
       migrationsList: migrations,

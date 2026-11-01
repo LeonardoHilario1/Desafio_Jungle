@@ -4,9 +4,9 @@ Serviço que processa transações de apostas, atualiza o saldo de carteiras e m
 ledger imutável, continuando correto com entrega at-least-once. As decisões de desenho
 estão em [ARCHITECTURE.md](ARCHITECTURE.md) e o escopo em [SPEC.md](SPEC.md).
 
-> Status: **Etapas 1 e 2** concluídas: infraestrutura, health checks, pipeline de
-> migrations e modelo de domínio (`src/domain`) com testes unitários. Schema e API ainda
-> não foram implementados.
+> Status: **Etapas 1 a 3** concluídas: infraestrutura, health checks, modelo de domínio
+> (`src/domain`), schema com constraints e mapeamento ORM. A API ainda não foi
+> implementada.
 
 ## Stack
 
@@ -60,6 +60,9 @@ separado (`wagering_test`), sem mocks do banco. Antes de rodar:
 docker compose up -d postgres localstack
 bun test
 ```
+
+As suítes recriam as tabelas do `wagering_test` a cada teste. Não aponte os testes para
+outro banco: o reset se recusa a rodar em bancos cujo nome não termina em `_test`.
 
 O banco `wagering_test` é criado por `docker/postgres/init` na **primeira** subida do
 volume. Se o volume já existia antes desse script, recrie-o com `docker compose down -v`.

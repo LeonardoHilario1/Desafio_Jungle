@@ -41,8 +41,8 @@ function codeOf(fn: () => unknown): string | undefined {
 describe('WagerTransaction.receive', () => {
   test('nasce PENDING, sem failureCode', () => {
     const tx = bet();
-    expect(tx.status).toBe('PENDING');
-    expect(tx.failureCode).toBeNull();
+    expect(tx.status()).toBe('PENDING');
+    expect(tx.failureCode()).toBeNull();
     expect(tx.isTerminal()).toBe(false);
   });
 
@@ -91,21 +91,21 @@ describe('transições de estado', () => {
   test('BET vai de PENDING para PROCESSED', () => {
     const tx = bet();
     tx.markProcessed();
-    expect(tx.status).toBe('PROCESSED');
-    expect(tx.processedAt).toBeInstanceOf(Date);
+    expect(tx.status()).toBe('PROCESSED');
+    expect(tx.processedAt()).toBeInstanceOf(Date);
     expect(tx.isTerminal()).toBe(true);
   });
 
   test('reject e fail guardam o failureCode', () => {
     const rejected = bet();
     rejected.reject('INSUFFICIENT_FUNDS');
-    expect(rejected.status).toBe('REJECTED');
-    expect(rejected.failureCode).toBe('INSUFFICIENT_FUNDS');
+    expect(rejected.status()).toBe('REJECTED');
+    expect(rejected.failureCode()).toBe('INSUFFICIENT_FUNDS');
 
     const failed = bet();
     failed.fail('INTERNAL_ERROR');
-    expect(failed.status).toBe('FAILED');
-    expect(failed.failureCode).toBe('INTERNAL_ERROR');
+    expect(failed.status()).toBe('FAILED');
+    expect(failed.failureCode()).toBe('INTERNAL_ERROR');
   });
 
   test.each(['markProcessed', 'reject', 'fail'] as const)('estado terminal não aceita %s', (method) => {
@@ -114,20 +114,20 @@ describe('transições de estado', () => {
     expect(codeOf(() => (method === 'markProcessed' ? tx.markProcessed() : tx[method]('INTERNAL_ERROR')))).toBe(
       'INVALID_STATE_TRANSITION',
     );
-    expect(tx.status).toBe('REJECTED');
+    expect(tx.status()).toBe('REJECTED');
   });
 
   test('WIN aguarda referência e depois é processada', () => {
     const w = win();
     w.awaitReference();
-    expect(w.status).toBe('PENDING_REFERENCE');
+    expect(w.status()).toBe('PENDING_REFERENCE');
 
     const b = bet();
     b.markProcessed();
     expect(w.linkReference(b)).toBeNull();
-    expect(w.referenceTransactionId).toBe(b.id);
+    expect(w.referenceTransactionId()).toBe(b.id);
     w.markProcessed();
-    expect(w.status).toBe('PROCESSED');
+    expect(w.status()).toBe('PROCESSED');
   });
 
   test('BET não pode aguardar referência', () => {

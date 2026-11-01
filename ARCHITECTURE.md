@@ -118,7 +118,61 @@ reconstruir e conferir o saldo pelo ledger.
 gravados como `failureCode` de uma transação; os demais (`INVALID_AMOUNT`,
 `INVALID_TRANSACTION`, ...) indicam entrada inválida e viram 4xx na API.
 
+## Etapa 3: schema
+
+### Mapeamento ORM (`src/persistence/entity-schemas.ts`)
+
+- `EntitySchema` sem decorators, com `type` e `columnType` explícitos em toda coluna.
+- O `EntitySchema` tipado exige mapear toda propriedade pública e não enxerga campos
+  privados. Por isso as classes de domínio guardam o estado persistido em campos
+  privados com tipos primitivos (por exemplo `balanceAmount: string`) e expõem `Money`
+  e o estado por **métodos** (`wallet.balance()`, `tx.status()`).
+- Tipos `*Row` descrevem os campos persistidos. O cast em `class` é o único ponto em
+  que a tipagem é contornada.
+- `numeric(18,2)` é lido e gravado como `string`: o driver `pg` devolve numeric como
+  string, e o domínio converte para `Money`.
+- **Sem relações ORM** (as FKs são colunas uuid escalares). Isso deixa o mapeamento
+  simples e evita carregamento implícito. A contrapartida é que o ORM não ordena os
+  inserts pelas FKs: o código grava na ordem carteira → transação → lançamento.
+
+### Constraints (migration `Migration20261101000000_wagering_schema`)
+
+| Regra | Como o banco garante |
+| --- | --- |
+| Uma carteira por jogador e moeda | `UNIQUE (player_id, currency)` |
+| Saldo não negativo | `CHECK (balance >= 0)`; no ledger, `amount > 0` e `balance_after >= 0` |
+| Idempotência | `UNIQUE (idempotency_key)` |
+| Um lançamento por transação (replay nunca debita duas vezes) | `UNIQUE (transaction_id)` no ledger |
+| Uma liquidação por BET | índice único parcial em `reference_transaction_id` `WHERE status = 'PROCESSED' AND type IN ('WIN','LOSS')` |
+| Moeda da transação e do lançamento = moeda da carteira | FK composta `(wallet_id, currency) → wallets (id, currency)` |
+| Lançamento e transação da mesma carteira | FK composta `(transaction_id, wallet_id) → wager_transactions (id, wallet_id)` |
+| BET liquidada da mesma carteira | FK composta `(reference_transaction_id, wallet_id) → wager_transactions (id, wallet_id)` |
+| Forma por tipo (BET/WIN/LOSS) | `CHECK` combinando `type`, `amount` e `reference_key` |
+| Coerência de estado | `CHECK`s: `failure_code` só em REJECTED/FAILED; `processed_at` só em terminais; WIN/LOSS só PROCESSED com referência |
+| Ledger imutável | trigger bloqueia `UPDATE`, `DELETE` e `TRUNCATE` |
+| Transação imutável | trigger bloqueia `DELETE`/`TRUNCATE`, alteração de campos de negócio e qualquer mudança após estado terminal |
+
+Os erros dos triggers usam SQLSTATE `P0001`, com `hint` `LEDGER_IMMUTABLE` ou
+`TRANSACTION_IMMUTABLE`.
+
+### Reversibilidade
+
+O `down` da migration de schema apaga as tabelas, mas **recusa rodar se o ledger tiver
+lançamentos**. Assim, um down acidental num ambiente com dados falha em vez de destruir
+o histórico financeiro.
+
+### Testes
+
+`test/integration/schema.test.ts` exercita cada constraint com SQL direto e confere o
+SQLSTATE e o nome da constraint. Também cobre a ida e volta pelo ORM (Money em string,
+`version`). Como o ledger bloqueia `DELETE`/`TRUNCATE`, o reset entre testes descarta e
+recria as tabelas.
+
 ## Limitações conhecidas (até aqui)
+
+- Os triggers não protegem contra o **dono** das tabelas, que pode desabilitá-los, nem
+  contra `DROP`. Em produção, a aplicação usaria uma role sem ownership, com só
+  `INSERT`/`SELECT` no ledger. No MVP, aplicação e migrations usam o mesmo usuário.
 
 - Todas as moedas usam escala 2.
 

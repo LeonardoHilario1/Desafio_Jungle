@@ -24,8 +24,8 @@ function fundedWallet(amount: string): Wallet {
 describe('Wallet.open', () => {
   test('abre com saldo zero e version 1', () => {
     const wallet = Wallet.open({ playerId: 'player-1', currency: 'BRL' });
-    expect(wallet.balance.equals(Money.zero('BRL'))).toBe(true);
-    expect(wallet.version).toBe(1);
+    expect(wallet.balance().equals(Money.zero('BRL'))).toBe(true);
+    expect(wallet.version()).toBe(1);
     expect(wallet.currency).toBe('BRL');
   });
 
@@ -38,15 +38,15 @@ describe('Wallet.open', () => {
 describe('debit e credit', () => {
   test('debit reduz o saldo, incrementa version e gera um lançamento', () => {
     const wallet = fundedWallet('100');
-    const versionBefore = wallet.version;
+    const versionBefore = wallet.version();
 
     const entry = wallet.debit(brl('80'), 'tx-1');
 
-    expect(wallet.balance.amount).toBe('20.00');
-    expect(wallet.version).toBe(versionBefore + 1);
+    expect(wallet.balance().amount).toBe('20.00');
+    expect(wallet.version()).toBe(versionBefore + 1);
     expect(entry.direction).toBe('DEBIT');
-    expect(entry.amount.amount).toBe('80.00');
-    expect(entry.balanceAfter.amount).toBe('20.00');
+    expect(entry.amount().amount).toBe('80.00');
+    expect(entry.balanceAfter().amount).toBe('20.00');
     expect(entry.walletId).toBe(wallet.id);
     expect(entry.transactionId).toBe('tx-1');
   });
@@ -54,25 +54,25 @@ describe('debit e credit', () => {
   test('credit aumenta o saldo e gera um lançamento CREDIT', () => {
     const wallet = fundedWallet('10');
     const entry = wallet.credit(brl('5.25'), 'tx-2');
-    expect(wallet.balance.amount).toBe('15.25');
+    expect(wallet.balance().amount).toBe('15.25');
     expect(entry.direction).toBe('CREDIT');
-    expect(entry.balanceAfter.amount).toBe('15.25');
+    expect(entry.balanceAfter().amount).toBe('15.25');
   });
 
   test('debitar o saldo exato zera a carteira', () => {
     const wallet = fundedWallet('100');
     wallet.debit(brl('100'), 'tx-1');
-    expect(wallet.balance.isZero()).toBe(true);
+    expect(wallet.balance().isZero()).toBe(true);
   });
 
   test('saldo insuficiente lança INSUFFICIENT_FUNDS e não altera a carteira', () => {
     const wallet = fundedWallet('100');
     wallet.debit(brl('80'), 'tx-1');
-    const version = wallet.version;
+    const version = wallet.version();
 
     expect(codeOf(() => wallet.debit(brl('80'), 'tx-2'))).toBe('INSUFFICIENT_FUNDS');
-    expect(wallet.balance.amount).toBe('20.00');
-    expect(wallet.version).toBe(version);
+    expect(wallet.balance().amount).toBe('20.00');
+    expect(wallet.version()).toBe(version);
   });
 
   test('moeda diferente da carteira lança CURRENCY_MISMATCH', () => {
@@ -83,8 +83,8 @@ describe('debit e credit', () => {
 
   test('movimento de valor zero é rejeitado e não altera a carteira', () => {
     const wallet = fundedWallet('100');
-    const version = wallet.version;
+    const version = wallet.version();
     expect(codeOf(() => wallet.credit(Money.zero('BRL'), 'tx'))).toBe('INVALID_AMOUNT');
-    expect(wallet.version).toBe(version);
+    expect(wallet.version()).toBe(version);
   });
 });

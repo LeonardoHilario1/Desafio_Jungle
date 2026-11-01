@@ -1,5 +1,5 @@
 import { DomainError, type FailureCode } from './domain-error';
-import type { Money } from './money';
+import { Money } from './money';
 import { sha256Hex } from './payload-hash';
 
 export const WAGER_TYPES = ['BET', 'WIN', 'LOSS'] as const;
@@ -36,13 +36,14 @@ export class WagerTransaction {
     readonly payloadHash: string,
     readonly walletId: string,
     readonly type: WagerType,
-    readonly amount: Money,
+    readonly currency: string,
+    private readonly amountValue: string,
     readonly referenceKey: string | null,
-    private _referenceTransactionId: string | null,
-    private _status: TransactionStatus,
-    private _failureCode: FailureCode | null,
+    private referenceTransactionIdValue: string | null,
+    private statusValue: TransactionStatus,
+    private failureCodeValue: FailureCode | null,
     readonly createdAt: Date,
-    private _processedAt: Date | null,
+    private processedAtValue: Date | null,
   ) {}
 
   static receive(params: ReceiveTransactionParams): WagerTransaction {
@@ -72,7 +73,8 @@ export class WagerTransaction {
       WagerTransaction.hashPayload({ walletId, type: params.type, amount: params.amount, referenceKey }),
       walletId,
       params.type,
-      params.amount,
+      params.amount.currency,
+      params.amount.amount,
       referenceKey,
       null,
       'PENDING',
@@ -97,24 +99,28 @@ export class WagerTransaction {
     });
   }
 
-  get status(): TransactionStatus {
-    return this._status;
+  amount(): Money {
+    return Money.of(this.amountValue, this.currency);
   }
 
-  get failureCode(): FailureCode | null {
-    return this._failureCode;
+  status(): TransactionStatus {
+    return this.statusValue;
   }
 
-  get referenceTransactionId(): string | null {
-    return this._referenceTransactionId;
+  failureCode(): FailureCode | null {
+    return this.failureCodeValue;
   }
 
-  get processedAt(): Date | null {
-    return this._processedAt;
+  referenceTransactionId(): string | null {
+    return this.referenceTransactionIdValue;
+  }
+
+  processedAt(): Date | null {
+    return this.processedAtValue;
   }
 
   isTerminal(): boolean {
-    return TERMINAL_STATUSES.includes(this._status);
+    return TERMINAL_STATUSES.includes(this.statusValue);
   }
 
   /**
@@ -132,21 +138,21 @@ export class WagerTransaction {
     }
     if (bet.type !== 'BET') return 'REFERENCE_NOT_A_BET';
     if (bet.walletId !== this.walletId) return 'REFERENCE_WALLET_MISMATCH';
-    if (bet.amount.currency !== this.amount.currency) return 'CURRENCY_MISMATCH';
-    if (bet.status !== 'PROCESSED') return 'REFERENCE_NOT_PROCESSED';
-    this._referenceTransactionId = bet.id;
+    if (bet.currency !== this.currency) return 'CURRENCY_MISMATCH';
+    if (bet.status() !== 'PROCESSED') return 'REFERENCE_NOT_PROCESSED';
+    this.referenceTransactionIdValue = bet.id;
     return null;
   }
 
   awaitReference(): void {
-    if (this._status !== 'PENDING' || this.type === 'BET') {
-      throw new DomainError('INVALID_STATE_TRANSITION', `${this.type} em ${this._status} não pode aguardar referência`);
+    if (this.statusValue !== 'PENDING' || this.type === 'BET') {
+      throw new DomainError('INVALID_STATE_TRANSITION', `${this.type} em ${this.statusValue} não pode aguardar referência`);
     }
-    this._status = 'PENDING_REFERENCE';
+    this.statusValue = 'PENDING_REFERENCE';
   }
 
   markProcessed(): void {
-    if (this.type !== 'BET' && this._referenceTransactionId === null) {
+    if (this.type !== 'BET' && this.referenceTransactionIdValue === null) {
       throw new DomainError('INVALID_STATE_TRANSITION', `${this.type} só é processada depois de vinculada à BET`);
     }
     this.finish('PROCESSED', null);
@@ -162,14 +168,14 @@ export class WagerTransaction {
 
   private finish(status: TransactionStatus, failureCode: FailureCode | null): void {
     this.assertOpen();
-    this._status = status;
-    this._failureCode = failureCode;
-    this._processedAt = new Date();
+    this.statusValue = status;
+    this.failureCodeValue = failureCode;
+    this.processedAtValue = new Date();
   }
 
   private assertOpen(): void {
     if (this.isTerminal()) {
-      throw new DomainError('INVALID_STATE_TRANSITION', `Transação já está em estado terminal (${this._status})`);
+      throw new DomainError('INVALID_STATE_TRANSITION', `Transação já está em estado terminal (${this.statusValue})`);
     }
   }
 }

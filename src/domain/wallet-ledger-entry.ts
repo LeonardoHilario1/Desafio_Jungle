@@ -1,12 +1,12 @@
 import { DomainError } from './domain-error';
-import type { Money } from './money';
+import { Money } from './money';
 
 export type LedgerDirection = 'DEBIT' | 'CREDIT';
 
 /**
  * Lançamento imutável do ledger. Só nasce por Wallet.debit/credit, para que toda
- * mudança de saldo tenha exatamente um lançamento. No banco, UPDATE e DELETE são
- * bloqueados (Etapa 3).
+ * mudança de saldo tenha exatamente um lançamento. No banco, UPDATE, DELETE e
+ * TRUNCATE são bloqueados por trigger.
  */
 export class WalletLedgerEntry {
   private constructor(
@@ -14,8 +14,9 @@ export class WalletLedgerEntry {
     readonly walletId: string,
     readonly transactionId: string,
     readonly direction: LedgerDirection,
-    readonly amount: Money,
-    readonly balanceAfter: Money,
+    readonly currency: string,
+    private readonly amountValue: string,
+    private readonly balanceAfterValue: string,
     readonly createdAt: Date,
   ) {}
 
@@ -38,9 +39,18 @@ export class WalletLedgerEntry {
       params.walletId,
       params.transactionId,
       params.direction,
-      params.amount,
-      params.balanceAfter,
+      params.amount.currency,
+      params.amount.amount,
+      params.balanceAfter.amount,
       new Date(),
     );
+  }
+
+  amount(): Money {
+    return Money.of(this.amountValue, this.currency);
+  }
+
+  balanceAfter(): Money {
+    return Money.of(this.balanceAfterValue, this.currency);
   }
 }
