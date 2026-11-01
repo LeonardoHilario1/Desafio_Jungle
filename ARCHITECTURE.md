@@ -1,371 +1,470 @@
 # Arquitetura
 
-Decisões, trade-offs e limitações do MVP do Distributed Wagering Processor. O escopo e
-as restrições estão no [SPEC.md](SPEC.md); setup e comandos, no [README.md](README.md).
+Decisões, trade-offs e limitações do Distributed Wagering Processor. O escopo inicial
+está no [SPEC.md](SPEC.md); a partir da Etapa 8, o contrato segue o enunciado completo
+do desafio. Setup e comandos estão no [README.md](README.md).
 
 ## Sumário
 
 1. [Visão geral](#visão-geral)
 2. [Conformidade com as restrições invioláveis](#conformidade-com-as-restrições-invioláveis)
-3. [Modelo de domínio](#modelo-de-domínio)
-4. [Concorrência e idempotência](#concorrência-e-idempotência)
-5. [Schema e garantias no banco](#schema-e-garantias-no-banco)
-6. [API](#api)
-7. [Outbox e publicação no SQS](#outbox-e-publicação-no-sqs)
-8. [Infraestrutura e operação](#infraestrutura-e-operação)
-9. [Testes](#testes)
-10. [Autenticação (desenho, não implementado)](#autenticação-desenho-não-implementado)
-11. [Trade-offs](#trade-offs)
-12. [Limitações e fora do escopo](#limitações-e-fora-do-escopo)
-13. [Quem decidiu o quê](#quem-decidiu-o-quê)
+3. [ORM, mapeamento do Money e estratégia transacional](#orm-mapeamento-do-money-e-estratégia-transacional)
+4. [Modelo de domínio](#modelo-de-domínio)
+5. [Regras de negócio](#regras-de-negócio)
+6. [Códigos de falha](#códigos-de-falha)
+7. [Concorrência e idempotência](#concorrência-e-idempotência)
+8. [Schema e garantias no banco](#schema-e-garantias-no-banco)
+9. [API](#api)
+10. [Eventos e outbox](#eventos-e-outbox)
+11. [Infraestrutura e operação](#infraestrutura-e-operação)
+12. [Testes](#testes)
+13. [Autenticação (desenho, não implementado)](#autenticação-desenho-não-implementado)
+14. [Trade-offs](#trade-offs)
+15. [Limitações e pendências](#limitações-e-pendências)
+16. [Quem decidiu o quê](#quem-decidiu-o-quê)
 
 ## Visão geral
 
 ```
-provedor ──HTTP──▶ NestJS (N instâncias)
-                     │  uma transação de banco por requisição:
-                     │  lock da carteira → idempotência → regra → transação + saldo + ledger + evento
-                     ▼
-                  PostgreSQL ◀── OutboxPublisher (em cada instância, FOR UPDATE SKIP LOCKED)
-                                        │
-                                        ▼
-                                SQS (fila padrão, LocalStack)
+provedor ──HTTP──▶ NestJS (N instâncias) ──▶ ProcessWagerTransaction (caso de uso)
+                                               │ uma transação SQL:
+                                               │ lock da carteira → idempotência → referência →
+                                               │ regras → transação + saldo + ledger + outbox
+                                               ▼
+                                            PostgreSQL ◀── OutboxPublisher (cada instância, SKIP LOCKED)
+                                                                  │
+                                                                  ▼
+                                                          SQS wagering-events
 ```
 
-- **A correção depende do PostgreSQL**, não do processo nem da fila: o lock, a
-  unicidade, a não negatividade e a imutabilidade estão no banco.
+- **A correção depende do PostgreSQL**, não do processo nem da fila: lock, unicidade,
+  não negatividade, aritmética do ledger e imutabilidade estão no banco.
 - **Instâncias sem estado:** qualquer número delas pode rodar ao mesmo tempo.
 - **Nenhum evento sai antes do commit:** ele é gravado na mesma transação e só depois
   publicado.
 
 | Pasta | Conteúdo |
 | --- | --- |
-| `src/domain` | `Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`; sem dependência de framework |
-| `src/persistence` | mapeamento MikroORM (`EntitySchema`) e tradução de erros do banco |
+| `src/domain` | `Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`, regras (`wager-rules.ts`), eventos de integração, `OutboxMessage`. Sem dependência de ORM nem de NestJS. |
+| `src/application` | casos de uso (`ProcessWagerTransaction`, `OpenWallet`, `WageringQueries`), a porta `WageringStore`/`WageringUnitOfWork` e os erros de aplicação |
+| `src/persistence` | records do MikroORM (`EntitySchema`), mappers record ↔ domínio, implementação da porta, tradução de erros do banco |
 | `src/migrations` | migrations SQL versionadas e reversíveis |
-| `src/wallets`, `src/wagering` | controllers e serviços da API |
-| `src/outbox` | evento de outbox, publisher e worker |
-| `src/api`, `src/auth`, `src/health` | erros e validação, guard de autenticação, health checks |
+| `src/wallets`, `src/wagering` | controllers e presenters HTTP |
+| `src/outbox` | publisher e worker |
+| `src/api`, `src/auth`, `src/health` | validação de entrada e filtro de erros, guard de autenticação, health checks |
 
 ## Conformidade com as restrições invioláveis
 
 | # | Restrição | Como é atendida | Evidência |
 | --- | --- | --- | --- |
-| 1 | Nada de `number`/`float`/`double` para dinheiro | `Money` guarda centavos em `bigint`, com entrada e saída em string de escala 2. Colunas `numeric(18,2)` lidas e gravadas como string. A API rejeita `amount` numérico. | `src/domain/money.ts`, `entity-schemas.ts`. Testes: `money.test.ts` ("rejeita number"), `wagering-api.test.ts` ("amount como number"). Auditoria por busca: `number` só aparece em porta, `version`, status HTTP e timeout. |
-| 2 | Nenhuma idempotência em memória | A chave e o `payloadHash` ficam em `wager_transactions`, com `UNIQUE (idempotency_key)`. A busca é feita no banco, com o lock da carteira. Não há cache. | `wagering.service.ts`. Testes de replay e conflito entre **duas instâncias** em `concurrency.test.ts`. |
-| 3 | Não confiar só em SQS FIFO | A fila é padrão (não FIFO). A consistência vem do banco. O evento leva `eventId` (deduplicação) e `walletVersion` (ordenação). | `docker/localstack/init`, `outbox-event.ts` |
-| 4 | Não publicar antes do commit | Outbox gravado na mesma transação. O publisher só lê linhas commitadas. | Teste "não publica evento de transação ainda não commitada" (`outbox.test.ts`) |
-| 5 | Nunca sobrescrever ou excluir o ledger | Trigger bloqueia `UPDATE`, `DELETE` e `TRUNCATE`. O `down` da migration recusa rodar com lançamentos. | `Migration20261101000000_wagering_schema.ts`. Testes em `schema.test.ts` e `migrations.test.ts`. |
-| 6 | Sem lock global | `SELECT ... FOR UPDATE` só na linha da carteira. Nenhum advisory lock nem `LOCK TABLE` (conferido por busca). | `wagering.service.ts` |
-| 7 | Sem ler → calcular → gravar sem controle | Leitura do saldo com `FOR UPDATE` na mesma transação da escrita, mais `CHECK (balance >= 0)` como rede. | Sem o lock, 12 dos 15 testes de concorrência falham (ver [Testes](#testes)) |
-| 8 | Correto com várias instâncias | Nenhum estado no processo. Os testes de concorrência sobem duas aplicações com pools separados. O outbox usa `SKIP LOCKED`. | `concurrency.test.ts`. Teste com 4 publishers em `outbox.test.ts`. |
-| 9 | Unicidade, imutabilidade e não negatividade no schema | `UNIQUE`, `CHECK`, FKs compostas, índice único parcial e triggers. | Tabela em [Schema](#schema-e-garantias-no-banco); um teste por constraint em `schema.test.ts` |
-| 10 | Testes de integração com PostgreSQL real | Os testes usam o PostgreSQL 16 do Compose (banco `wagering_test`) e o LocalStack real. Sem mock de banco. | `test/integration/*` |
+| 1 | Nada de `number`/`float`/`double` para dinheiro | `Money` guarda centavos em `bigint`; entrada e saída em string de escala 2. Colunas `numeric(18,2)` lidas e gravadas como string. A API rejeita `amount` numérico. | `money.ts`, `mappers.ts`. Testes: `money.test.ts`, `wagering-api.test.ts` ("money numérico"). |
+| 2 | Idempotência não fica em memória | Chave e `payloadHash` em `wager_transactions`, com `UNIQUE (idempotency_key)`; busca no banco sob o lock da carteira. | `process-wager-transaction.ts`; replay entre **3 instâncias** em `concurrency.test.ts` |
+| 3 | Não confiar só em SQS FIFO | A fila de eventos é padrão. A consistência vem do banco; o evento leva `eventId` determinístico (deduplicação) e `walletVersion` (ordenação). | `integration-event.ts` |
+| 4 | Não publicar antes do commit | Outbox gravada na mesma transação; o publisher só lê linhas commitadas. | "não publica mensagem de transação ainda não commitada" (`outbox.test.ts`) |
+| 5 | Ledger nunca sobrescrito nem excluído | Trigger bloqueia `UPDATE`, `DELETE` e `TRUNCATE`; o `down` recusa rodar com lançamentos. | `Migration20261102010000_ledger.ts`; `schema.test.ts`, `migrations.test.ts` |
+| 6 | Sem lock global | `SELECT ... FOR UPDATE` só na linha da carteira; nenhum advisory lock nem `LOCK TABLE`. | `mikro-orm-wagering-store.ts` |
+| 7 | Sem ler → calcular → gravar sem controle | Saldo lido com `FOR UPDATE` na mesma transação da escrita; `CHECK (balance >= 0)` e `UNIQUE (wallet_id, wallet_version)` no ledger como redes. | Sem o lock, 13 dos 16 testes de concorrência falham |
+| 8 | Correto com várias instâncias | Nada de estado no processo. Os testes de concorrência sobem **três** aplicações com pools separados; a outbox usa `SKIP LOCKED`. | `concurrency.test.ts`; 4 publishers em `outbox.test.ts` |
+| 9 | Garantias no schema | `UNIQUE`, `CHECK`, FKs compostas, índices únicos parciais e triggers. | [Schema](#schema-e-garantias-no-banco); um teste por constraint em `schema.test.ts` |
+
+## ORM, mapeamento do Money e estratégia transacional
+
+- **MikroORM 7** (a opção preferencial): Unit of Work, Identity Map,
+  `EntityManager.transactional()` e `LockMode` explícitos.
+- **Domínio separado da persistência.** O MikroORM mapeia *records* (`WalletRecord`,
+  `WagerTransactionRecord`, `LedgerEntryRecord`, `OutboxMessageRecord`), classes
+  simples espelhando as tabelas, com `EntitySchema` sem decorators e `type` +
+  `columnType` explícitos em toda coluna. Os mappers (`persistence/mappers.ts`) convertem
+  record → domínio pelas factories `rehydrate` e domínio → record copiando o estado para o
+  record gerenciado; o Unit of Work gera o `UPDATE`.
+  - **Por quê:** `Money` ocupa duas colunas (valor e moeda) e o domínio expõe estado só
+    por getters sobre campos privados. Mapear as classes de domínio direto exigiria
+    expor primitivos ou tipos do ORM no domínio, o que o desafio proíbe.
+- **Mapeamento do Money:** valor em `numeric(18,2)` (lido como string pelo driver `pg`)
+  e moeda em `char(3)`; reidratado com `Money.from`, que aceita exatamente a forma que o
+  PostgreSQL devolve. Nenhum valor passa por `number`.
+- **Estratégia transacional:** uma transação SQL por operação, `READ COMMITTED`, aberta
+  pela porta `WageringUnitOfWork.run`. Dentro dela: `SET LOCAL lock_timeout = '5s'`, lock
+  pessimista da carteira (`LockMode.PESSIMISTIC_WRITE` → `FOR UPDATE`) e gravação de
+  transação, saldo, lançamento e outbox. Violações de `UNIQUE` e `lock_timeout` são
+  traduzidas pela implementação da porta para erros que o caso de uso entende
+  (`DuplicateTransactionError`, `LockTimeoutError`).
+- **Ordem de gravação:** não há relações ORM (só colunas uuid), então os inserts são
+  ordenados com flushes em sequência: carteira → transação → lançamento e outbox.
 
 ## Modelo de domínio
 
-Classes em `src/domain`, com construtor privado e factories estáticas. O MikroORM
-reconstrói entidades lidas do banco com `Object.create(prototype)`, sem chamar o
-construtor.
+Todas as classes têm construtor privado e factories estáticas (`create`/`open`/`from`,
+`rehydrate`). `rehydrate` reconstrói estado persistido sem revalidar transições.
 
 ### Money
 
-- Guarda centavos em `bigint`. Entrada e saída são strings decimais com escala 2
-  (`"10"` e `"10.5"` viram `"10.00"` e `"10.50"`).
-- Aceita até 16 dígitos inteiros e 2 decimais (o intervalo de `numeric(18,2)`). Rejeita
-  sinal, expoente, espaços, zeros à esquerda e `number` em tempo de execução.
-- Não negativo: subtração com resultado negativo e estouro lançam `AMOUNT_OUT_OF_RANGE`.
-- Operações entre moedas diferentes lançam `CURRENCY_MISMATCH`.
-- Imutável: `Object.freeze` e operações que devolvem nova instância.
+- Centavos em `bigint`; entrada e saída como string decimal com escala fixa 2
+  (`"10"` → `"10.00"`). Formato de contrato `{ "amount": "25.00", "currency": "BRL" }`.
+- `from` rejeita `NaN`, `Infinity`, notação científica, string vazia, mais de 2 casas,
+  negativos, sinal, espaços, zeros à esquerda e `number`. Não há arredondamento: um valor
+  com terceira casa é rejeitado.
+- Operações: `add`, `subtract`, `negate`, `isZero`, `isPositive`, `isNegative`,
+  `isLessThan`, `equals`, `toJSON`, `toString`. Valores negativos só surgem por operação
+  (nunca por contrato de entrada) e quem grava garante não negatividade.
+- Moedas diferentes lançam `CURRENCY_MISMATCH`. Imutável (`Object.freeze`).
 
-### Wallet e WalletLedgerEntry
+### Wallet (aggregate root)
 
-- O saldo só muda por `debit` e `credit`. Cada um valida moeda e saldo, incrementa
-  `version` e **devolve o lançamento do ledger**. Toda mudança de saldo tem exatamente
-  um lançamento, por construção.
-- O lançamento é imutável e guarda `amount` e `balanceAfter`.
-- O lançamento de abertura (`kind = 'OPENING'`) registra o `initialBalance`: é CREDIT,
-  não tem transação de aposta e existe no máximo um por carteira. Assim, saldo = soma do
-  ledger vale desde a criação.
+- `Wallet.open({ playerId, initialBalance })` devolve a carteira com **version 1** e, se o
+  saldo inicial for maior que zero, a transação interna **OPENING** (já PROCESSED) e o
+  lançamento CREDIT de 0 até o saldo inicial. Os três são gravados na mesma transação SQL.
+- Getters `balance`, `version`, `updatedAt`. O saldo só muda por `debit`/`credit`, que
+  validam moeda e saldo, incrementam `version` e **devolvem o lançamento**: saldo e
+  ledger não divergem por construção.
+- `version` começa em 1 e incrementa só quando o saldo muda. Não é usado para optimistic
+  locking (a estratégia é pessimista); serve para ordenar o ledger e os eventos.
+
+### WalletLedgerEntry
+
+- Imutável estruturalmente (campos `readonly` e `Object.freeze`), sem transições.
+- Guarda `money`, `balanceBefore`, `balanceAfter` e `walletVersion` (version da carteira
+  depois do lançamento). `create` valida `isBalanced()` (`balanceBefore ± money =
+  balanceAfter`), valor positivo e saldos não negativos.
+- Uma transação gera no máximo um lançamento. LOSS e REJECTED não geram.
 
 ### WagerTransaction
 
-| Tipo | Valor | `referenceKey` | Efeito no saldo |
-| --- | --- | --- | --- |
-| BET | > 0 | proibida | débito |
-| WIN | > 0 | obrigatória: chave de idempotência da BET | crédito |
-| LOSS | `0.00` | obrigatória: chave de idempotência da BET | nenhum (só liquida a aposta) |
+- Campos do desafio: `providerId`, `externalTransactionId`, `idempotencyKey`,
+  `payloadHash`, `walletId`, `playerId`, `roundId`, `gameId`, `kind`, `money`,
+  `referenceExternalTransactionId` (id **no provedor**), mais `correlationId` e o
+  **saldo observado** (`observedBalance`), devolvido em todo replay.
+- `create` nasce em `PENDING` e valida a forma por kind (tabela abaixo). OPENING não pode
+  ser criada por `create`: só por `Wallet.open`.
+- Getters `status`, `referenceTransactionId`, `failureCode`, `processedAt`,
+  `observedBalance`. Consultas: `isTerminal`, `affectsBalance` (false para LOSS),
+  `requiresReference` (REFUND e ROLLBACK), `matchesPayload`, `ledgerDirectionFor`.
 
-- **Referência:** WIN e LOSS apontam para a BET pela chave de idempotência dela, porque
-  é o identificador que o provedor conhece.
-- **Estados:**
-  - `PENDING`: só existe em memória; nunca é commitado pela API.
-  - `PENDING_REFERENCE`: WIN/LOSS cuja BET ainda não chegou.
-  - `PROCESSED`, `REJECTED` e `FAILED`: terminais, não mudam mais.
-  - Uma WIN/LOSS só vira PROCESSED depois de vinculada à BET.
-- **`failureCode`:** valores estáveis, em `FAILURE_CODES`:
-  - `INSUFFICIENT_FUNDS`
-  - `CURRENCY_MISMATCH`
-  - `REFERENCE_NOT_A_BET`
-  - `REFERENCE_NOT_PROCESSED`
-  - `REFERENCE_WALLET_MISMATCH`
-  - `BET_ALREADY_SETTLED`
-  - `INTERNAL_ERROR`
-- **`payloadHash`:** SHA-256 do JSON canônico (chaves ordenadas) de `walletId`, `type`,
-  `amount` normalizado, `currency` e `referenceKey`. A chave de idempotência fica de fora,
-  porque é a identidade da requisição, não o conteúdo.
+**Transições válidas:**
+
+```
+PENDING ──▶ PROCESSED | REJECTED | FAILED | PENDING_REFERENCE
+PENDING_REFERENCE ──▶ PROCESSED | REJECTED | FAILED
+```
+
+`PROCESSED`, `REJECTED` e `FAILED` são terminais. Tentar transicionar a partir deles
+lança `InvalidTransactionStateError` (erro de programação). No banco, um trigger repete a
+regra e impede voltar de `PENDING_REFERENCE` para `PENDING`. `PENDING` nunca é
+commitado: a transação é gravada já no estado decidido.
+
+## Regras de negócio
+
+As regras ficam em `applyWager` (`src/domain/wager-rules.ts`), uma função pura: recebe a
+carteira travada, a transação e o que foi lido do banco (a referência e se ela já foi
+revertida), decide e executa a transição.
+
+| Kind | Valor | Referência | Efeito no saldo | Ledger |
+| --- | --- | --- | --- | --- |
+| OPENING (interna) | > 0 | não | crédito | 1 CREDIT |
+| BET | > 0 | proibida | débito | 1 DEBIT |
+| WIN | > 0 | opcional: BET da mesma rodada | crédito | 1 CREDIT |
+| LOSS | >= 0 | opcional: BET da mesma rodada | nenhum | nenhum |
+| REFUND | = valor da referência | obrigatória: BET PROCESSED | crédito | 1 CREDIT |
+| ROLLBACK | = valor da referência | obrigatória: BET, WIN ou REFUND PROCESSED | inverso da referência | 1 invertido |
+
+Ordem das verificações:
+
+1. moeda da operação = moeda da carteira; `playerId` = dono da carteira;
+2. referência (se informada), resolvida por `(providerId, referenceExternalTransactionId)`:
+   - ausente, ou ainda aberta → `PENDING_REFERENCE`;
+   - REJECTED ou FAILED → `REFERENCE_NOT_PROCESSED`;
+   - de outro jogador, carteira, moeda ou rodada → `REFERENCE_MISMATCH`;
+   - de tipo não permitido → `REFERENCE_KIND_NOT_ALLOWED`;
+3. reversões: valor igual ao da referência e nenhuma reversão anterior;
+4. débito sem saldo → `INSUFFICIENT_FUNDS` (BET) ou `REVERSAL_INSUFFICIENT_FUNDS`
+   (ROLLBACK de WIN ou REFUND).
+
+**Interpretações adotadas** (o desafio pede que sejam documentadas):
+
+- **Uma reversão por referência, de qualquer tipo.** O enunciado proíbe reverter a
+  mesma referência duas vezes "pelo mesmo tipo de operação". Isso permitiria um REFUND e
+  um ROLLBACK da mesma BET, creditando duas vezes. Aqui a referência é revertida no
+  máximo uma vez (índice único parcial); a segunda tentativa é `REFERENCE_ALREADY_REVERSED`.
+  Um ROLLBACK de um REFUND é permitido, porque a referência é outra.
+- **BET não referencia nada; WIN e LOSS podem referenciar só BET.** WIN/LOSS sem
+  referência são aceitas (o enunciado diz "pode referenciar").
+- **LOSS aceita qualquer valor >= 0** e nunca move saldo.
+- **Moeda ou jogador divergentes são gravados como REJECTED** (auditáveis, com evento),
+  em vez de recusados sem registro. Por isso a FK de moeda está no ledger, não na
+  transação.
+- **Carteira inexistente** responde 404 sem gravar (não há carteira a que associar).
+
+## Códigos de falha
+
+Toda rejeição carrega um `failureCode` estável (`FAILURE_CODES` em `domain-error.ts`).
+A coluna "provedor" diz o que fazer.
+
+| `failureCode` | Situação | Provedor |
+| --- | --- | --- |
+| `INSUFFICIENT_FUNDS` | BET acima do saldo | desistir; repetir dá o mesmo resultado |
+| `REVERSAL_INSUFFICIENT_FUNDS` | ROLLBACK de crédito que deixaria saldo negativo | escalar para operação (o crédito já foi consumido) |
+| `CURRENCY_MISMATCH` | moeda diferente da carteira | corrigir o payload (nova chave) |
+| `PLAYER_MISMATCH` | `playerId` diferente do dono da carteira | corrigir o payload |
+| `REFERENCE_NOT_FOUND` | referência não chegou dentro do limite (Etapa 10) | conferir o id da referência |
+| `REFERENCE_KIND_NOT_ALLOWED` | tipo de referência inválido para o kind | corrigir o payload |
+| `REFERENCE_NOT_PROCESSED` | referência terminou REJECTED/FAILED | desistir |
+| `REFERENCE_MISMATCH` | referência de outro jogador, carteira, moeda ou rodada | corrigir o payload |
+| `REFERENCE_AMOUNT_MISMATCH` | valor da reversão diferente do da referência | corrigir o payload |
+| `REFERENCE_ALREADY_REVERSED` | referência já revertida | desistir; já foi feito |
+
+`FAILED` usa `PROCESSING_FAILED` (`PERMANENT_FAILURE_CODES`), reservado para o consumidor
+da fila (Etapa 10).
 
 ## Concorrência e idempotência
 
-`POST /wagering/transactions` roda em uma única transação de banco (`READ COMMITTED`):
+`ProcessWagerTransaction` (usado pela API e, na Etapa 10, pelo consumidor da fila) roda
+em uma única transação SQL (`READ COMMITTED`):
 
 1. `SET LOCAL lock_timeout = '5s'`.
-2. `SELECT ... FOR UPDATE` na carteira. Requisições para a mesma carteira são
-   serializadas; carteiras diferentes não disputam lock.
-3. **Com o lock na mão**, busca a `Idempotency-Key`. Em `READ COMMITTED` cada comando
-   enxerga o que já foi commitado, então uma requisição concorrente que pegou o lock antes
-   já está visível. Mesmo hash é replay; hash diferente é 409.
-4. Aplica a regra:
-   - BET debita ou é rejeitada por saldo;
-   - WIN/LOSS procura a BET: grava `PENDING_REFERENCE`, `REJECTED`, ou liquida.
-5. Grava transação, saldo (`version` + 1), lançamento e evento de outbox. Depois, commit.
+2. `SELECT ... FOR UPDATE` na carteira. Operações da mesma carteira são serializadas em
+   qualquer instância; carteiras diferentes não disputam lock.
+3. **Com o lock**, busca a `Idempotency-Key`. Em `READ COMMITTED` cada comando enxerga o
+   que já foi commitado, então a requisição concorrente que pegou o lock antes já está
+   visível: mesmo `payloadHash` é replay; outro é 409. Mesmo
+   `(providerId, externalTransactionId)` com outra chave também é 409.
+4. Resolve a referência, aplica `applyWager` e grava transação, saldo, lançamento e
+   eventos. Commit.
+
+**Por que pessimista:** a operação é curta e sempre toca uma linha de carteira; o lock
+evita retry por conflito, não tem deadlock (uma linha por transação) e torna trivial
+raciocinar sobre a hot wallet. O custo é o throughput de uma carteira isolada (ver
+[Trade-offs](#trade-offs)).
 
 **Casos de borda:**
 
 - **Mesma chave para carteiras diferentes ao mesmo tempo:** o lock por carteira não
-  serializa esse caso. O `UNIQUE (idempotency_key)` barra o segundo insert, e o
-  resultado é decidido relendo o registro vencedor.
-- **Liquidação dupla da mesma BET:** a BET é da mesma carteira, então a verificação roda
-  sob o mesmo lock. O índice único parcial é a garantia final.
-- **Sem deadlock:** cada transação trava uma única linha de carteira.
-- **Lock esgotado:** responde 503 `WALLET_BUSY` sem gravar nada; repetir é seguro.
+  serializa esse caso. O `UNIQUE` barra o segundo insert e o resultado é decidido relendo
+  o vencedor.
+- **Referência e reversão:** a referência válida é da mesma carteira, então ler o seu
+  estado e verificar reversões anteriores acontece sob o mesmo lock. O índice único
+  parcial é a garantia final.
+- **Lock esgotado:** 503 `WALLET_BUSY` com `Retry-After`, sem gravar nada; repetir com a
+  mesma chave é seguro.
+
+**`payloadHash`:** SHA-256 em hexadecimal do JSON canônico (chaves ordenadas
+recursivamente, sem espaços, só strings e `null`) dos campos de negócio: `providerId`,
+`externalTransactionId`, `walletId`, `playerId`, `roundId`, `gameId`, `kind`,
+`money: { amount normalizado, currency }` e `referenceExternalTransactionId`. Ficam de
+fora a `Idempotency-Key`, o `X-Correlation-Id` e metadados de transporte. `"10"` e
+`"10.00"` geram o mesmo hash.
 
 ## Schema e garantias no banco
 
-Quatro migrations SQL escritas à mão, todas com `down`:
+Migrations SQL escritas à mão, todas com `down`:
 
 | Migration | Conteúdo |
 | --- | --- |
 | `Migration20261031000000_baseline` | fuso do banco em UTC |
-| `Migration20261101000000_wagering_schema` | carteiras, transações e ledger, com constraints e triggers |
-| `Migration20261101010000_opening_balance` | lançamento de abertura |
-| `Migration20261101020000_outbox` | outbox |
+| `Migration20261102000000_wallets_and_transactions` | carteiras e transações, constraints e trigger de imutabilidade |
+| `Migration20261102010000_ledger` | ledger, aritmética, triggers |
+| `Migration20261102020000_outbox` | outbox |
+
+> As migrations do domínio foram **consolidadas na Etapa 8**: o schema mudou por inteiro
+> para o contrato do desafio e nada tinha sido publicado. Um volume local criado antes
+> precisa ser recriado (`docker compose down -v`).
 
 | Regra | Como o banco garante |
 | --- | --- |
 | Uma carteira por jogador e moeda | `UNIQUE (player_id, currency)` |
-| Saldo não negativo | `CHECK (balance >= 0)`; no ledger, `amount > 0` e `balance_after >= 0` |
-| Idempotência | `UNIQUE (idempotency_key)` |
+| Saldo não negativo | `CHECK (balance >= 0)`; ledger com `balance_before >= 0` e `balance_after >= 0` |
+| Idempotência | `UNIQUE (idempotency_key)` e `UNIQUE (provider_id, external_transaction_id)` |
 | Um lançamento por transação | `UNIQUE (transaction_id)` no ledger |
-| No máximo uma abertura por carteira | índice único parcial `WHERE kind = 'OPENING'` |
-| Uma liquidação por BET | índice único parcial em `reference_transaction_id WHERE status = 'PROCESSED' AND type IN ('WIN','LOSS')` |
-| Moeda de transação e lançamento = moeda da carteira | FK composta `(wallet_id, currency) → wallets (id, currency)` |
-| Lançamento e transação da mesma carteira | FK composta `(transaction_id, wallet_id) → wager_transactions (id, wallet_id)` |
-| BET liquidada da mesma carteira | FK composta `(reference_transaction_id, wallet_id) → wager_transactions (id, wallet_id)` |
-| Forma por tipo | `CHECK` combinando `type`, `amount` e `reference_key` |
-| Coerência de estado | `CHECK`: `failure_code` só em REJECTED/FAILED; `processed_at` só em terminais; WIN/LOSS só PROCESSED com referência |
+| Sem lost update no ledger | `UNIQUE (wallet_id, wallet_version)`: dois lançamentos partindo do mesmo saldo colidem |
+| Aritmética do lançamento | `CHECK (balance_after = balance_before ± amount)` |
+| Lançamento só de transação que move saldo | trigger de inserção exige transação `PROCESSED` e não LOSS |
+| Moeda do lançamento = carteira = transação | FKs compostas `(wallet_id, currency) → wallets` e `(transaction_id, wallet_id, currency) → wager_transactions` |
+| Referência do mesmo provedor, jogador, carteira, moeda e rodada | FK composta `(reference_transaction_id, provider_id, player_id, wallet_id, currency, round_id)` |
+| Uma reversão por referência | índice único parcial em `reference_transaction_id WHERE status = 'PROCESSED' AND kind IN ('REFUND','ROLLBACK')` |
+| Uma OPENING por carteira | índice único parcial em `wallet_id WHERE kind = 'OPENING'` |
+| Forma por kind | `CHECK` combinando `kind`, `amount` e referência; provedor `internal` reservado à OPENING |
+| Coerência de estado | `CHECK`s: `failure_code` ⇔ REJECTED/FAILED; `processed_at` ⇔ terminal; saldo observado presente fora de PENDING/FAILED; PENDING_REFERENCE só com referência; vínculo ⇔ PROCESSED com referência |
 | Ledger imutável | trigger bloqueia `UPDATE`, `DELETE` e `TRUNCATE` |
-| Transação imutável | trigger bloqueia exclusão, mudança de campos de negócio e mudança após estado terminal |
-| Outbox imutável | trigger permite mudar só as colunas de controle de publicação; `published_at` não volta |
+| Transação imutável | trigger bloqueia exclusão, mudança de campos de negócio, mudança após estado terminal e volta a PENDING |
+| Outbox imutável | trigger permite mudar só o controle de publicação; `published_at` não volta; `CHECK` amarra `id`/`event_type` ao envelope |
 
-- **Erros dos triggers:** usam SQLSTATE `P0001` com `hint` estável
-  (`LEDGER_IMMUTABLE`, `TRANSACTION_IMMUTABLE`, `OUTBOX_IMMUTABLE`).
-- **Reversibilidade:** os `down` que apagariam dados financeiros (schema, abertura,
-  outbox) **recusam rodar se houver dados**. Um down acidental falha em vez de destruir
-  histórico.
-- **Mapeamento ORM:** `EntitySchema` sem decorators, com `type` e `columnType`
-  explícitos em toda coluna. O MikroORM 7 não lê `design:type`, e as entidades não
-  dependem disso.
-  - O `EntitySchema` tipado não enxerga campos privados. Por isso o estado persistido
-    fica em campos privados com tipos primitivos (por exemplo `balanceAmount: string`),
-    e `Money` e o estado saem por métodos (`wallet.balance()`, `tx.status()`).
-  - Não há relações ORM, só colunas uuid. O código grava na ordem das FKs: carteira →
-    transação → lançamento e evento.
+- **Erros dos triggers:** SQLSTATE `P0001` com `hint` estável (`LEDGER_IMMUTABLE`,
+  `TRANSACTION_IMMUTABLE`, `OUTBOX_IMMUTABLE`, `LEDGER_REQUIRES_PROCESSED_TRANSACTION`).
+- **Reversibilidade:** os `down` que apagariam dados financeiros **recusam rodar se
+  houver dados**.
 
 ## API
 
 | Método | Rota | Descrição |
 | --- | --- | --- |
 | GET | `/health/live` | 200 enquanto o processo está de pé, sem consultar dependências |
-| GET | `/health/ready` | `select 1` no PostgreSQL e `GetQueueUrl` da fila, com timeout de 2 s; 503 com o detalhe |
-| POST | `/wallets` | `playerId`, `currency`, `initialBalance` opcional |
-| GET | `/wallets/:id` | carteira e saldo |
-| POST | `/wagering/transactions` | BET, WIN, LOSS; header `Idempotency-Key` obrigatório |
+| GET | `/health/ready` | `select 1` no PostgreSQL e `GetQueueUrl` da fila, timeout de 2 s; 503 com o detalhe |
+| POST | `/wallets` | `{ playerId, initialBalance: { amount, currency } }` → `{ id, playerId, balance, version, ... }` |
+| GET | `/wallets/:walletId` | carteira e saldo |
+| POST | `/wagering/transactions` | `Idempotency-Key` obrigatório; corpo do desafio → `{ transactionId, status, balance, idempotentReplay, failureCode? }` |
+| GET | `/wagering/transactions/:transactionId` | transação completa |
+| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | transação pelo id do provedor |
+
+`X-Correlation-Id` (opcional) é gravado na transação e propagado aos eventos; sem ele, um
+novo é gerado.
 
 ### Status HTTP
 
-| Situação | Status |
-| --- | --- |
-| PROCESSED | 201 |
-| PENDING_REFERENCE | 202 |
-| REJECTED (regra de negócio, gravada com `failureCode`) | 422 |
-| Replay | o mesmo da primeira resposta, com header `Idempotent-Replayed: true` |
-| Mesma chave, payload diferente | 409 `IDEMPOTENCY_KEY_CONFLICT` |
-| Entrada inválida | 400 (`INVALID_REQUEST`, `IDEMPOTENCY_KEY_REQUIRED`, `INVALID_AMOUNT`, `INVALID_TRANSACTION`, ...) |
-| Carteira inexistente | 404 `WALLET_NOT_FOUND` |
-| Moeda diferente da carteira | 422 `CURRENCY_MISMATCH` (não gravada: a FK composta não permitiria) |
-| Carteira duplicada | 409 `WALLET_ALREADY_EXISTS`, com `details.walletId` |
-| Lock não obtido em 5 s | 503 `WALLET_BUSY` |
+O mapeamento é o mesmo em todos os endpoints:
 
-- **Replay reproduz a resposta original**, porque o status deriva só do estado gravado.
+| Situação | Status | Reenviar? |
+| --- | --- | --- |
+| PROCESSED | 201 | não precisa; replay devolve o mesmo |
+| PENDING_REFERENCE (aceita, processamento pendente) | 202 | não; será reprocessada |
+| REJECTED (regra de negócio, gravada com `failureCode`) | 422 | não; ver [Códigos de falha](#códigos-de-falha) |
+| Replay | o mesmo status da primeira resposta, `idempotentReplay: true` | — |
+| Mesma chave, payload diferente | 409 `IDEMPOTENCY_KEY_CONFLICT` | não |
+| Mesmo id externo, outra chave | 409 `EXTERNAL_TRANSACTION_CONFLICT` | não |
+| Payload inválido | 400 (`INVALID_REQUEST`, `IDEMPOTENCY_KEY_REQUIRED`, `INVALID_AMOUNT`, `INVALID_CURRENCY`, `INVALID_TRANSACTION`, `INVALID_WALLET`) | corrigir |
+| Carteira ou transação inexistente | 404 `WALLET_NOT_FOUND` / `TRANSACTION_NOT_FOUND` | — |
+| Carteira duplicada | 409 `WALLET_ALREADY_EXISTS`, com `details.walletId` | não |
+| Falha transitória (lock não obtido em 5 s) | 503 `WALLET_BUSY`, `Retry-After: 1` | sim, mesma chave |
+| Erro inesperado | 500 `INTERNAL_ERROR`, nada gravado | sim, mesma chave |
+
+- **Replay reproduz a resposta original:** status e corpo derivam só do estado gravado,
+  incluindo o saldo observado naquele momento.
 - **Formato dos erros:** `{ "error": { "code", "message", "details"? } }`.
-- **Validação manual** (`src/api/request.ts`): checa o tipo de cada campo e rejeita
-  campos desconhecidos. As regras de valor ficam no domínio.
-- **FAILED não é produzido pela API.** Uma falha inesperada desfaz a transação (500) e
-  não consome a chave. Gravar FAILED tornaria definitiva uma falha transitória. O estado
-  fica reservado para processamento assíncrono, fora do MVP.
+- **Validação manual** (`src/api/request.ts`): tipo de cada campo, `money` como objeto de
+  strings e rejeição de campos desconhecidos. As regras de valor ficam no domínio.
 
-## Outbox e publicação no SQS
+## Eventos e outbox
 
-- **Gravação:** cada transação gravada gera um evento no mesmo commit:
-  - `wager.transaction.processed`
-  - `wager.transaction.rejected`
-  - `wager.transaction.pending_reference`
+- **Envelope:** classe abstrata `IntegrationEvent<T>` com uma subclasse por evento;
+  `eventType` e `version` ficam no tipo. `toJSON()` produz
+  `{ eventId, eventType, aggregateId, correlationId, causationId?, occurredAt (ISO-8601), version, data }`.
+  `data` carrega `MoneyProps`, nunca `Money`.
+- **Eventos:**
 
-  `UNIQUE (aggregate_id, event_type)` impede duplicata. O payload leva valores em
-  string, o saldo depois da operação e `walletVersion`.
+  | Evento | Quando | `aggregateId` |
+  | --- | --- | --- |
+  | `WagerTransactionProcessed` | qualquer transação aplicada, inclusive LOSS e OPENING | transação |
+  | `WagerTransactionRejected` | rejeição por regra de negócio | transação |
+  | `WalletBalanceChanged` | só quando o saldo muda (com `balanceBefore`, `balanceAfter`, `walletVersion`) | carteira |
+  | `WagerTransactionPendingReference` | referência ausente | transação |
+
+- **`eventId` determinístico:** UUID derivado de `(transactionId, eventType)`. É a PK da
+  outbox, então o mesmo fato nunca é gravado duas vezes, e o consumidor deduplica
+  republicações pelo `eventId`.
+- **`OutboxMessage`** (domínio): `enqueue(event)`, `isPending`, `isDue`,
+  `markPublished`, `scheduleRetry` (backoff 2^n s, máximo 300 s, sem limite de tentativas:
+  um evento confirmado não pode ser perdido).
 - **Publicação** (`OutboxPublisher`), dentro de uma transação:
-  1. seleciona até 10 eventos pendentes com `FOR UPDATE SKIP LOCKED`;
-  2. envia com `SendMessageBatch`, com os atributos `eventId` e `eventType`;
-  3. marca `published_at`; se falhar, incrementa `attempts`, grava `last_error` e agenda
-     nova tentativa com backoff exponencial (2^n s, máximo 300 s);
-  4. faz commit.
-- **Várias instâncias:** cada uma roda o seu `OutboxPublisherWorker`, e o `SKIP LOCKED`
-  divide as linhas.
-- **At-least-once:** se o processo cair entre o envio e o commit que marca
-  `published_at`, o evento é reenviado. O consumidor deduplica por `eventId`.
-- **Configuração:** `OUTBOX_PUBLISHER_ENABLED` (padrão `true`) e
-  `OUTBOX_POLL_INTERVAL_MS` (padrão 500).
+  1. seleciona até 10 mensagens vencidas com `FOR UPDATE SKIP LOCKED`
+     (`LockMode.PESSIMISTIC_PARTIAL_WRITE`);
+  2. envia com `SendMessageBatch` (atributos `eventId` e `eventType`);
+  3. marca publicada ou agenda nova tentativa, gravando `last_error`; commit.
+- **Várias instâncias:** cada uma roda o seu worker; o `SKIP LOCKED` divide as linhas.
+  Se uma instância morre depois do commit e antes de publicar, outra publica (teste).
+- **At-least-once:** queda entre o envio e o commit reenvia a mensagem; o `eventId` é o
+  mesmo.
 
 ## Infraestrutura e operação
 
-- **Docker Compose:**
-  - `postgres` 16;
-  - `localstack` 4.4, só SQS, com a fila criada por script de init;
-  - `migrate`, que roda as migrations uma vez e termina;
-  - `app`, que só sobe depois de `migrate` terminar com sucesso.
+- **Docker Compose:** `postgres` 16; `localstack` 4.4 (só SQS, fila criada por script de
+  init); `migrate`, que roda as migrations uma vez e termina; `app`, que só sobe depois.
 - **Migrations nunca rodam na subida da aplicação:** com várias instâncias, todas
   tentariam migrar ao mesmo tempo.
-- **LocalStack fixado em 4.4:** essa versão sobe sem token de conta; imagens mais novas
-  exigem token.
-- **Configuração** validada na subida (`src/config.ts`). O `AppModule.register(config)`
-  recebe a configuração por parâmetro, o que permite aos testes montar instâncias com
-  configurações diferentes.
+- **LocalStack fixado em 4.4:** versões mais novas exigem token de conta.
+- **Configuração** validada na subida (`src/config.ts`); `AppModule.register(config)`
+  permite aos testes montar várias instâncias.
 
 ## Testes
 
-Para rodar: `bun test`. São 158 testes no total.
+`bun test` roda 244 testes (unidade e integração); `bun run test:concurrency` roda o
+arquivo de concorrência 20 vezes (320 execuções, cerca de 110 s).
 
 | Suíte | O que cobre |
 | --- | --- |
-| `test/unit` | `Money`, `Wallet`, `WagerTransaction`, configuração |
-| `schema.test.ts` | cada constraint e trigger, com SQLSTATE e nome da constraint, e ida e volta pelo ORM |
+| `test/unit/domain` | `Money` (escala, entradas inválidas, negate, moedas), `Wallet`, `WalletLedgerEntry`, `WagerTransaction` (forma, hash, transições), regras de BET/WIN/LOSS/REFUND/ROLLBACK, eventos e `OutboxMessage` |
+| `schema.test.ts` | cada constraint e trigger, com SQLSTATE e nome; ida e volta pelos mappers |
 | `migrations.test.ts` | `up` e `down` completos; `down` recusado com dados |
-| `wallets-api.test.ts`, `wagering-api.test.ts` | API, status HTTP, idempotência, regras de BET/WIN/LOSS |
-| `outbox.test.ts` | atomicidade, nada publicado antes do commit, 4 publishers sem duplicata, falha com backoff, imutabilidade, worker |
-| `concurrency.test.ts` | duas instâncias da aplicação com pools separados (ver abaixo) |
+| `wallets-api.test.ts`, `wagering-api.test.ts` | contrato, status HTTP, idempotência, regras e consultas; invariantes após cada teste |
+| `outbox.test.ts` | atomicidade, nada publicado antes do commit, 4 publishers sem duplicata, falha com backoff, crash antes de publicar, imutabilidade, worker |
+| `concurrency.test.ts` | **três instâncias** com pools separados |
 
-**Cenários de concorrência**, com as invariantes conferidas no banco ao fim de cada um
-(`test/support/invariants.ts`):
+**Cenários de concorrência** (invariantes conferidas no banco depois de cada um):
 
-- saldo 100 e duas BET de 80 em paralelo (10 rodadas): uma PROCESSED, uma REJECTED,
-  saldo 20.00, um débito;
-- a mesma BET 50 vezes: um débito, uma linha, 49 replays;
-- a mesma WIN 50 vezes: um crédito;
-- WIN e LOSS da mesma BET em paralelo: só uma liquida;
-- carga mista embaralhada, com replays pela outra instância.
+- cenário obrigatório: 100.00 e duas BET de 80.00 em instâncias diferentes (10 rodadas);
+- a mesma BET 50 vezes por 3 instâncias: um débito, 49 replays, todos com o mesmo saldo;
+- o mesmo REFUND 30 vezes: um crédito;
+- REFUND e ROLLBACK da mesma BET em paralelo: uma reversão;
+- hot wallet: 60 BET concorrentes, 14 processadas, saldo final exato;
+- carteiras distintas com carga mista embaralhada (dependentes antes da referência,
+  replays).
 
-**Invariantes verificadas:**
+**Invariantes** (`test/support/invariants.ts`): saldo = ledger; ledger encadeado por
+`wallet_version` (`balance_before` = `balance_after` anterior); `version` = 1 +
+movimentos; lançamento correto por transação que move saldo; nenhum lançamento para
+LOSS/REJECTED/PENDING_REFERENCE; eventos do estado gravados. Um teste confirma que a
+verificação detecta uma divergência real.
 
-- saldo = créditos − débitos do ledger;
-- `version` = 1 + número de lançamentos;
-- BET/WIN processada tem exatamente um lançamento do valor e na direção certa;
-- transações sem efeito no saldo não têm lançamento;
-- toda transação tem exatamente um evento no outbox.
-
-Um teste confirma que a verificação detecta uma divergência real.
-
-**Teste de mutação:** sem o `FOR UPDATE`, 12 dos 15 testes de concorrência falham (lost
-update). O cenário das 50 BETs iguais continua passando, porque o `UNIQUE` da chave
-segura sozinho: as camadas são independentes.
-
-**Execução repetida:** `bun run test:concurrency` roda o arquivo 20 vezes (300 testes,
-cerca de 70 s).
+**Teste de mutação:** sem o `FOR UPDATE`, 13 dos 16 testes de concorrência falham.
 
 ## Autenticação (desenho, não implementado)
 
-Hoje o `AuthGuard` (`src/auth/auth.guard.ts`) não restringe nada. Ele está aplicado aos
-controllers de carteira e de apostas como ponto de extensão.
+O `AuthGuard` (`src/auth/auth.guard.ts`) não restringe nada; está aplicado aos controllers
+de carteira e de apostas como ponto de extensão. Health fica aberto.
 
-Desenho previsto com um IdP externo (por exemplo Keycloak, Auth0 ou Cognito):
+Desenho previsto com um IdP externo (Keycloak ou Zitadel no Compose):
 
-1. Cada provedor de jogos é um cliente do IdP e obtém um access token JWT via
-   **OAuth 2.0 client credentials**.
-2. O `AuthGuard` valida assinatura (chaves do JWKS do IdP, em cache e com rotação),
-   `iss`, `aud`, `exp`/`nbf` e escopos (`wagering:write`, `wallets:read`).
-3. O `sub` do token identifica o provedor e entra no contexto da requisição.
-4. A `Idempotency-Key` passa a ser única **por provedor**: `UNIQUE (provider_id,
-   idempotency_key)`. Assim, dois provedores não colidem nem enxergam as transações um do
-   outro.
-5. Autorização por carteira: o provedor só opera carteiras de jogadores vinculados a ele.
-6. Para provedores que não suportam OAuth, a alternativa é mTLS ou assinatura HMAC do
-   corpo com timestamp (proteção contra replay), validada no mesmo guard.
+1. Cada provedor de jogos é um cliente do IdP e obtém um JWT via **OAuth 2.0 client
+   credentials**.
+2. O `AuthGuard` valida assinatura (JWKS em cache, com rotação), `iss`, `aud`,
+   `exp`/`nbf` e escopos (`wagering:write`, `wallets:read`).
+3. O `sub` identifica o provedor; o guard exige que ele seja igual ao `providerId` do
+   corpo.
+4. Autorização por carteira: o provedor só opera carteiras de jogadores vinculados a ele.
+5. Mensagens da fila são canal interno confiável, mas o `providerId` delas passa pelas
+   mesmas validações de domínio.
 
 ## Trade-offs
 
 | Escolha | Ganho | Custo |
 | --- | --- | --- |
-| Lock pessimista por carteira | Simples de raciocinar; sem retry por conflito; sem deadlock (uma linha por transação) | Throughput de **uma carteira** limitado pela serialização. Carteiras diferentes não se afetam. |
-| Lock antes da busca de idempotência | Replays concorrentes da mesma chave e carteira são serializados e enxergam o vencedor | O replay também espera o lock da carteira |
-| Rejeições gravadas (REJECTED) e repetíveis por replay | Resposta estável: o replay de uma rejeição continua rejeitado, mesmo que o saldo mude | Uma BET rejeitada não pode ser "tentada de novo" com a mesma chave; o provedor precisa de chave nova |
-| Erros transitórios não gravados | Repetir com a mesma chave é seguro e pode dar certo | O 503/500 não deixa rastro no banco (só no log) |
-| Outbox em vez de publicar direto | Nenhum evento sem commit; nenhum commit sem evento | Latência de publicação (poll de 500 ms) e entrega at-least-once |
-| Linhas do outbox travadas durante o envio | Nenhuma linha é enviada por dois publishers ao mesmo tempo | Transação aberta durante a chamada ao SQS (lote pequeno, `SKIP LOCKED` evita espera) |
-| Migrations SQL à mão, sem relações ORM | Controle total de constraints e triggers; mapeamento simples | O código precisa respeitar a ordem das FKs ao gravar |
-| Validação manual da entrada | Sem dependência extra; rejeição de campos desconhecidos | Mais código que `class-validator` se a API crescer |
+| Lock pessimista por carteira | Simples de raciocinar; sem retry por conflito; sem deadlock | Throughput de **uma carteira** limitado pela serialização; carteiras diferentes não se afetam |
+| Lock antes da busca de idempotência | Replays concorrentes enxergam o vencedor | O replay também espera o lock |
+| Domínio separado dos records do ORM | Domínio puro, `Money` como objeto, `rehydrate` explícito | Mappers a manter em sincronia com o schema |
+| Rejeições gravadas e repetíveis por replay | Resposta estável; rejeições auditáveis com evento | Uma BET rejeitada exige chave nova para nova tentativa |
+| Erros transitórios não gravados | Repetir com a mesma chave é seguro | 503/500 não deixam rastro no banco (só no log) |
+| `eventId` determinístico | Deduplicação na gravação e no consumidor | O id não é aleatório (é derivado de dados internos) |
+| Outbox em vez de publicar direto | Nenhum evento sem commit; nenhum commit sem evento | Latência de publicação (poll de 500 ms) e at-least-once |
+| Migrations SQL à mão, sem relações ORM | Controle total de constraints e triggers | Ordem de gravação imposta no código |
 
-## Limitações e fora do escopo
+## Limitações e pendências
 
-**Fora do escopo do SPEC, não implementado:**
+**Pendente nas próximas etapas:**
 
-- **Autenticação:** guard sem efeito; desenho [acima](#autenticação-desenho-não-implementado).
-- **Reprocessamento de PENDING_REFERENCE com backoff:** a WIN/LOSS que chega antes da BET
-  fica em `PENDING_REFERENCE`. Quando a BET chega, nada a reprocessa, e o replay da mesma
-  chave devolve o estado gravado.
-- **Métricas completas e teste de carga.** Também não há alerta de eventos do outbox com
-  muitas tentativas.
-- **REFUND e ROLLBACK, consumidor SQS com inbox, `GET` do ledger com cursor e
-  reconciliação** (opcionais do SPEC). REFUND/ROLLBACK chegam como 400
-  `INVALID_TRANSACTION`.
+- **Etapa 9:** `GET /wallets/:id/ledger` com cursor e `POST /wallets/:id/reconciliation`.
+- **Etapa 10:** consumidor SQS (`wager-transactions.fifo` e DLQ) com inbox, ack depois
+  do commit, retry/DLQ e SIGTERM; worker que reprocessa `PENDING_REFERENCE` com backoff e
+  limite (`REFERENCE_NOT_FOUND` ao esgotar). Hoje uma transação `PENDING_REFERENCE` só
+  fica gravada; quando a referência chega, nada a reprocessa ainda.
+- **Etapa 11:** logs JSON com `correlationId` e métricas; testes de crash antes do ack,
+  reinício e DLQ.
 
 **Limitações conhecidas:**
 
-- **Depósitos:** só o saldo inicial da abertura. Não há depósito nem saque depois.
-- **Moedas:** todas usam escala 2. Moedas com outra escala (JPY, BHD) não são suportadas.
-- **Usuário do banco:** os triggers de imutabilidade não protegem contra o **dono** das
-  tabelas, que pode desabilitá-los, nem contra `DROP`. Em produção, a aplicação usaria
-  uma role sem ownership, com só `INSERT`/`SELECT` no ledger e no outbox. No MVP,
-  aplicação e migrations usam o mesmo usuário.
-- **Migrate concorrente:** o Migrator do MikroORM 7.2 não usa advisory lock (conferido no
-  código do pacote), então duas execuções simultâneas do `migrate` não são seguras. O
-  Compose roda uma só; em produção seria um job único no deploy.
-- **Outbox:** não há dead-letter para eventos que falham sempre (são tentados a cada
-  300 s), nem limpeza de eventos publicados.
-- **Ordem dos eventos:** a fila padrão não garante ordem; o consumidor deve usar
-  `walletVersion`.
-- **Carteira muito disputada:** recebe 503 após 5 s de espera pelo lock. O provedor deve
-  repetir com a mesma chave.
+- **Depósitos:** só o saldo inicial da abertura.
+- **Moedas:** todas com escala 2 (JPY, BHD não suportadas).
+- **Usuário do banco:** os triggers não protegem contra o **dono** das tabelas nem contra
+  `DROP`. Em produção, a aplicação usaria uma role sem ownership.
+- **Migrate concorrente:** o Migrator do MikroORM 7.2 não usa advisory lock; o Compose
+  roda um só.
+- **Outbox:** sem limpeza de mensagens publicadas.
+- **Carteira muito disputada:** 503 após 5 s de espera pelo lock.
 
 ## Quem decidiu o quê
 
 - **Definido pelo responsável no SPEC:** stack, restrições, lock pessimista por
-  carteira com `CHECK (balance >= 0)` e `version`, idempotência por `Idempotency-Key` e
-  `payloadHash`, outbox, estados e escopo.
-- **Decidido pelo responsável durante a implementação:** saldo inicial como lançamento
-  de abertura no `POST /wallets`, entre as opções apresentadas.
-- **Proposto pela IA e apresentado ao responsável ao fim de cada etapa:** repositório
-  próprio, migration de base mínima, banco de testes no Compose, forma de BET/WIN/LOSS e
-  referência pela chave da BET. Também os status HTTP, FAILED reservado para
-  processamento assíncrono, fila padrão e erros transitórios não gravados. As escolhas da
-  Etapa 1 foram delegadas pelo responsável ("faça o que achar melhor"). As demais foram
-  destacadas no resumo de cada etapa antes de seguir.
+  carteira, idempotência por `Idempotency-Key` e `payloadHash`, outbox, estados e o escopo
+  do MVP (Etapas 1 a 7).
+- **Decidido pelo responsável:** saldo inicial no `POST /wallets` (Etapa 4); alinhar a
+  entrega ao enunciado completo do desafio (Etapa 8 em diante).
+- **Proposto pela IA e apresentado ao fim de cada etapa:** separação domínio/records,
+  consolidação das migrations, uma reversão por referência de qualquer tipo, rejeições de
+  moeda e jogador gravadas, `wallet_version` no ledger, `eventId` determinístico,
+  taxonomia de `failureCode` e o mapeamento de status HTTP.

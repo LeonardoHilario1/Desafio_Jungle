@@ -1,46 +1,85 @@
-import { Body, Controller, Headers, Inject, Post, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Inject, Param, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiError } from '../api/api-error';
-import { optionalString, parseBody, requiredString, requireUuid } from '../api/request';
+import { eventContext, optionalString, parseBody, requiredMoney, requiredString, requireUuid } from '../api/request';
+import { ProcessWagerTransaction } from '../application/process-wager-transaction';
+import { WageringQueries } from '../application/wagering-queries';
 import { AuthGuard } from '../auth/auth.guard';
-import type { WagerType } from '../domain/wager-transaction';
-import { httpStatusFor, presentTransaction, type TransactionView } from './transaction.presenter';
-import { WageringService } from './wagering.service';
+import type { SubmittableKind } from '../domain/wager-transaction';
+import {
+  httpStatusFor,
+  presentSubmit,
+  presentTransaction,
+  type SubmitView,
+  type TransactionView,
+} from './transaction.presenter';
 
 interface HttpResponse {
   status(code: number): unknown;
-  setHeader(name: string, value: string): unknown;
 }
 
-// REFUND e ROLLBACK ficaram fora do MVP; chegam como 400 INVALID_TRANSACTION do domínio.
-const FIELDS = ['walletId', 'type', 'amount', 'currency', 'referenceKey'] as const;
+const FIELDS = [
+  'providerId',
+  'externalTransactionId',
+  'playerId',
+  'walletId',
+  'roundId',
+  'gameId',
+  'kind',
+  'money',
+  'referenceExternalTransactionId',
+] as const;
 
-@Controller('wagering')
+@Controller()
 @UseGuards(AuthGuard)
 export class WageringController {
-  constructor(@Inject(WageringService) private readonly wagering: WageringService) {}
+  constructor(
+    @Inject(ProcessWagerTransaction) private readonly processWager: ProcessWagerTransaction,
+    @Inject(WageringQueries) private readonly queries: WageringQueries,
+  ) {}
 
-  @Post('transactions')
+  /** Idempotency-Key é obrigatório e é a fonte da verdade; sugerido "{providerId}:{externalTransactionId}". */
+  @Post('wagering/transactions')
   async submit(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Headers('x-correlation-id') correlationId: string | undefined,
     @Body() rawBody: unknown,
     @Res({ passthrough: true }) res: HttpResponse,
-  ): Promise<TransactionView> {
+  ): Promise<SubmitView> {
     if (idempotencyKey === undefined || idempotencyKey.trim() === '') {
       throw new ApiError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Header Idempotency-Key é obrigatório');
     }
     const body = parseBody(rawBody, FIELDS);
 
-    const { transaction, replayed } = await this.wagering.submit({
-      idempotencyKey,
-      walletId: requireUuid(requiredString(body, 'walletId'), 'walletId'),
-      type: requiredString(body, 'type') as WagerType,
-      amount: requiredString(body, 'amount'),
-      currency: requiredString(body, 'currency'),
-      referenceKey: optionalString(body, 'referenceKey'),
-    });
+    const result = await this.processWager.execute(
+      {
+        idempotencyKey,
+        providerId: requiredString(body, 'providerId'),
+        externalTransactionId: requiredString(body, 'externalTransactionId'),
+        playerId: requiredString(body, 'playerId'),
+        walletId: requireUuid(requiredString(body, 'walletId'), 'walletId'),
+        roundId: requiredString(body, 'roundId'),
+        gameId: requiredString(body, 'gameId'),
+        kind: requiredString(body, 'kind') as SubmittableKind,
+        money: requiredMoney(body, 'money'),
+        referenceExternalTransactionId: optionalString(body, 'referenceExternalTransactionId'),
+      },
+      eventContext(correlationId, idempotencyKey),
+    );
 
-    res.status(httpStatusFor(transaction));
-    res.setHeader('Idempotent-Replayed', String(replayed));
-    return presentTransaction(transaction);
+    res.status(httpStatusFor(result.transaction));
+    return presentSubmit(result);
+  }
+
+  @Get('wagering/transactions/:transactionId')
+  async get(@Param('transactionId') transactionId: string): Promise<TransactionView> {
+    return presentTransaction(await this.queries.transaction(requireUuid(transactionId, 'transactionId')));
+  }
+
+  @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
+  async getByExternalId(
+    @Param('providerId') providerId: string,
+    @Param('externalTransactionId') externalTransactionId: string,
+  ): Promise<TransactionView> {
+    return presentTransaction(await this.queries.transactionByExternalId(providerId, externalTransactionId));
   }
 }

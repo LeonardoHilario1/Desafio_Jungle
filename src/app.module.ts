@@ -4,16 +4,19 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
 import { ErrorFilter } from './api/error.filter';
+import { OpenWallet } from './application/open-wallet';
+import { ProcessWagerTransaction } from './application/process-wager-transaction';
+import { WageringQueries } from './application/wagering-queries';
+import { WAGERING_UNIT_OF_WORK } from './application/wagering-store';
 import { APP_CONFIG, type AppConfig } from './config';
 import { HealthController } from './health/health.controller';
 import { ReadinessService } from './health/readiness.service';
 import { ormOptions } from './mikro-orm.config';
 import { OutboxPublisher } from './outbox/outbox-publisher';
 import { OutboxPublisherWorker } from './outbox/outbox-publisher.worker';
+import { MikroOrmWageringUnitOfWork } from './persistence/mikro-orm-wagering-store';
 import { WageringController } from './wagering/wagering.controller';
-import { WageringService } from './wagering/wagering.service';
 import { WalletsController } from './wallets/wallets.controller';
-import { WalletsService } from './wallets/wallets.service';
 
 // Módulo dinâmico: a configuração entra por parâmetro, e os testes montam a
 // aplicação apontando para o banco de testes sem mexer em process.env.
@@ -38,9 +41,16 @@ export class AppModule {
               },
             }),
         },
+        // Porta de persistência dos casos de uso, implementada com MikroORM.
+        {
+          provide: WAGERING_UNIT_OF_WORK,
+          useFactory: (orm: MikroORM) => new MikroOrmWageringUnitOfWork(orm),
+          inject: [MikroORM],
+        },
         ReadinessService,
-        WalletsService,
-        WageringService,
+        OpenWallet,
+        ProcessWagerTransaction,
+        WageringQueries,
         {
           provide: OutboxPublisher,
           useFactory: (orm: MikroORM, sqs: SQSClient) => new OutboxPublisher(orm, sqs, config.sqs.outboxQueueName),

@@ -1,171 +1,167 @@
 import { describe, expect, test } from 'bun:test';
-import { DomainError } from '../../../src/domain/domain-error';
+import { InvalidTransactionStateError } from '../../../src/domain/domain-error';
 import { Money } from '../../../src/domain/money';
-import { canonicalJson } from '../../../src/domain/payload-hash';
-import { WagerTransaction, type ReceiveTransactionParams } from '../../../src/domain/wager-transaction';
+import { WagerTransaction, type CreateWagerTransactionProps } from '../../../src/domain/wager-transaction';
+import { brl, errorCode, txProps as props } from '../../support/domain';
 
-const brl = (amount: string) => Money.of(amount, 'BRL');
 
-function bet(overrides: Partial<ReceiveTransactionParams> = {}): WagerTransaction {
-  return WagerTransaction.receive({
-    idempotencyKey: 'bet-1',
-    walletId: 'wallet-1',
-    type: 'BET',
-    amount: brl('10'),
-    referenceKey: null,
-    ...overrides,
-  });
-}
-
-function win(overrides: Partial<ReceiveTransactionParams> = {}): WagerTransaction {
-  return WagerTransaction.receive({
-    idempotencyKey: 'win-1',
-    walletId: 'wallet-1',
-    type: 'WIN',
-    amount: brl('25'),
-    referenceKey: 'bet-1',
-    ...overrides,
-  });
-}
-
-function codeOf(fn: () => unknown): string | undefined {
-  try {
-    fn();
-  } catch (error) {
-    if (error instanceof DomainError) return error.code;
-    throw error;
-  }
-  return undefined;
-}
-
-describe('WagerTransaction.receive', () => {
-  test('nasce PENDING, sem failureCode', () => {
-    const tx = bet();
-    expect(tx.status()).toBe('PENDING');
-    expect(tx.failureCode()).toBeNull();
-    expect(tx.isTerminal()).toBe(false);
+describe('WagerTransaction.create', () => {
+  test('nasce PENDING com os campos de negócio', () => {
+    const tx = WagerTransaction.create(props());
+    expect(tx.status).toBe('PENDING');
+    expect(tx).toMatchObject({ providerId: 'provider-a', externalTransactionId: 'tx-1', kind: 'BET' });
+    expect(tx.money.amount).toBe('10.00');
+    expect(tx.referenceTransactionId).toBeNull();
+    expect(tx.payloadHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test.each<[string, Partial<ReceiveTransactionParams>]>([
-    ['BET com referência', { type: 'BET', referenceKey: 'x' }],
-    ['BET com valor zero', { type: 'BET', amount: brl('0') }],
-    ['WIN sem referência', { type: 'WIN', referenceKey: null }],
-    ['WIN com valor zero', { type: 'WIN', referenceKey: 'bet-1', amount: brl('0') }],
-    ['LOSS sem referência', { type: 'LOSS', referenceKey: null, amount: brl('0') }],
-    ['LOSS com valor', { type: 'LOSS', referenceKey: 'bet-1', amount: brl('1') }],
-    ['tipo desconhecido', { type: 'REFUND' as never }],
-    ['idempotencyKey vazia', { idempotencyKey: '' }],
-    ['idempotencyKey longa demais', { idempotencyKey: 'k'.repeat(256) }],
-    ['walletId vazio', { walletId: ' ' }],
-  ])('rejeita %s', (_, overrides) => {
-    expect(codeOf(() => bet(overrides))).toBe('INVALID_TRANSACTION');
+  test.each([
+    ['BET com referência', { kind: 'BET', referenceExternalTransactionId: 'bet-0' }],
+    ['BET de valor zero', { kind: 'BET', money: brl('0') }],
+    ['WIN de valor zero', { kind: 'WIN', money: brl('0') }],
+    ['REFUND sem referência', { kind: 'REFUND' }],
+    ['ROLLBACK sem referência', { kind: 'ROLLBACK' }],
+    ['REFUND de valor zero', { kind: 'REFUND', money: brl('0'), referenceExternalTransactionId: 'bet-0' }],
+    ['referência a si mesma', { kind: 'WIN', referenceExternalTransactionId: 'tx-1' }],
+    ['OPENING pela API', { kind: 'OPENING' }],
+    ['kind desconhecido', { kind: 'JACKPOT' }],
+    ['providerId vazio', { providerId: '' }],
+    ['roundId vazio', { roundId: ' ' }],
+    ['gameId longo demais', { gameId: 'g'.repeat(256) }],
+  ] as const)('rejeita %s', (_, overrides) => {
+    expect(errorCode(() => WagerTransaction.create(props(overrides as Partial<CreateWagerTransactionProps>)))).toBe(
+      'INVALID_TRANSACTION',
+    );
   });
 
-  test('aceita LOSS com valor zero e referência', () => {
-    const loss = bet({ idempotencyKey: 'loss-1', type: 'LOSS', amount: brl('0'), referenceKey: 'bet-1' });
-    expect(loss.type).toBe('LOSS');
+  test.each([
+    ['WIN sem referência', { kind: 'WIN' }],
+    ['WIN com referência', { kind: 'WIN', referenceExternalTransactionId: 'bet-0' }],
+    ['LOSS de valor zero', { kind: 'LOSS', money: brl('0') }],
+    ['LOSS com valor', { kind: 'LOSS', money: brl('10'), referenceExternalTransactionId: 'bet-0' }],
+    ['REFUND', { kind: 'REFUND', referenceExternalTransactionId: 'bet-0' }],
+    ['ROLLBACK', { kind: 'ROLLBACK', referenceExternalTransactionId: 'bet-0' }],
+  ] as const)('aceita %s', (_, overrides) => {
+    expect(WagerTransaction.create(props(overrides as Partial<CreateWagerTransactionProps>)).status).toBe('PENDING');
   });
 });
 
 describe('payloadHash', () => {
-  test('não depende da chave de idempotência nem da forma do valor', () => {
-    const a = bet({ idempotencyKey: 'a', amount: brl('10') });
-    const b = bet({ idempotencyKey: 'b', amount: brl('10.00') });
+  test('não depende da Idempotency-Key, do correlationId nem da forma do valor', () => {
+    const a = WagerTransaction.create(props({ money: brl('10') }));
+    const b = WagerTransaction.create(props({ money: brl('10.00'), idempotencyKey: 'outra', correlationId: 'c' }));
     expect(a.payloadHash).toBe(b.payloadHash);
-    expect(a.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(a.matchesPayload(b.payloadHash)).toBe(true);
   });
 
-  test('muda quando muda um campo de negócio', () => {
-    const base = bet().payloadHash;
-    expect(bet({ amount: brl('10.01') }).payloadHash).not.toBe(base);
-    expect(bet({ amount: Money.of('10', 'USD') }).payloadHash).not.toBe(base);
-    expect(bet({ walletId: 'wallet-2' }).payloadHash).not.toBe(base);
-  });
-
-  test('JSON canônico ordena as chaves', () => {
-    expect(canonicalJson({ b: '1', a: { d: null, c: '2' } })).toBe('{"a":{"c":"2","d":null},"b":"1"}');
+  test.each([
+    ['valor', { money: brl('10.01') }],
+    ['moeda', { money: Money.from({ amount: '10', currency: 'USD' }) }],
+    ['kind', { kind: 'WIN' }],
+    ['carteira', { walletId: 'wallet-2' }],
+    ['jogador', { playerId: 'player-2' }],
+    ['rodada', { roundId: 'round-2' }],
+    ['jogo', { gameId: 'game-2' }],
+    ['provedor', { providerId: 'provider-b' }],
+    ['id externo', { externalTransactionId: 'tx-2' }],
+  ] as const)('muda quando muda %s', (_, overrides) => {
+    const base = WagerTransaction.create(props());
+    const changed = WagerTransaction.create(props(overrides as Partial<CreateWagerTransactionProps>));
+    expect(changed.matchesPayload(base.payloadHash)).toBe(false);
   });
 });
 
-describe('transições de estado', () => {
-  test('BET vai de PENDING para PROCESSED', () => {
-    const tx = bet();
-    tx.markProcessed();
-    expect(tx.status()).toBe('PROCESSED');
-    expect(tx.processedAt()).toBeInstanceOf(Date);
+describe('transições', () => {
+  test('PENDING → PROCESSED registra saldo observado e momento', () => {
+    const tx = WagerTransaction.create(props());
+    const at = new Date('2026-01-01T00:00:00Z');
+    tx.markProcessed(null, brl('90'), at);
+    expect(tx.status).toBe('PROCESSED');
+    expect(tx.observedBalance!.amount).toBe('90.00');
+    expect(tx.processedAt).toBe(at);
     expect(tx.isTerminal()).toBe(true);
   });
 
-  test('reject e fail guardam o failureCode', () => {
-    const rejected = bet();
-    rejected.reject('INSUFFICIENT_FUNDS');
-    expect(rejected.status()).toBe('REJECTED');
-    expect(rejected.failureCode()).toBe('INSUFFICIENT_FUNDS');
-
-    const failed = bet();
-    failed.fail('INTERNAL_ERROR');
-    expect(failed.status()).toBe('FAILED');
-    expect(failed.failureCode()).toBe('INTERNAL_ERROR');
+  test('PENDING → PENDING_REFERENCE → PROCESSED, com vínculo à referência', () => {
+    const tx = WagerTransaction.create(props({ kind: 'REFUND', referenceExternalTransactionId: 'bet-0' }));
+    tx.markPendingReference(brl('100'));
+    expect(tx.status).toBe('PENDING_REFERENCE');
+    expect(tx.isTerminal()).toBe(false);
+    tx.markProcessed('bet-id', brl('110'));
+    expect(tx.referenceTransactionId).toBe('bet-id');
   });
 
-  test.each(['markProcessed', 'reject', 'fail'] as const)('estado terminal não aceita %s', (method) => {
-    const tx = bet();
-    tx.reject('INSUFFICIENT_FUNDS');
-    expect(codeOf(() => (method === 'markProcessed' ? tx.markProcessed() : tx[method]('INTERNAL_ERROR')))).toBe(
-      'INVALID_STATE_TRANSITION',
-    );
-    expect(tx.status()).toBe('REJECTED');
+  test('reject e fail gravam o código', () => {
+    const rejected = WagerTransaction.create(props());
+    rejected.reject('INSUFFICIENT_FUNDS', brl('5'));
+    expect(rejected.failureCode).toBe('INSUFFICIENT_FUNDS');
+
+    const failed = WagerTransaction.create(props());
+    failed.fail('PROCESSING_FAILED');
+    expect(failed.status).toBe('FAILED');
+    expect(failed.failureCode).toBe('PROCESSING_FAILED');
   });
 
-  test('WIN aguarda referência e depois é processada', () => {
-    const w = win();
-    w.awaitReference();
-    expect(w.status()).toBe('PENDING_REFERENCE');
+  test.each(['markProcessed', 'reject', 'fail', 'markPendingReference'] as const)(
+    'estado terminal não muda: %s lança InvalidTransactionStateError',
+    (method) => {
+      const tx = WagerTransaction.create(props({ kind: 'WIN', referenceExternalTransactionId: 'bet-0' }));
+      tx.markProcessed('bet-id', brl('1'));
+      const call = {
+        markProcessed: () => tx.markProcessed('bet-id', brl('1')),
+        reject: () => tx.reject('INSUFFICIENT_FUNDS', brl('1')),
+        fail: () => tx.fail('PROCESSING_FAILED'),
+        markPendingReference: () => tx.markPendingReference(brl('1')),
+      }[method];
+      expect(call).toThrow(InvalidTransactionStateError);
+    },
+  );
 
-    const b = bet();
-    b.markProcessed();
-    expect(w.linkReference(b)).toBeNull();
-    expect(w.referenceTransactionId()).toBe(b.id);
-    w.markProcessed();
-    expect(w.status()).toBe('PROCESSED');
-  });
-
-  test('BET não pode aguardar referência', () => {
-    expect(codeOf(() => bet().awaitReference())).toBe('INVALID_STATE_TRANSITION');
-  });
-
-  test('WIN não é processada sem vínculo com a BET', () => {
-    expect(codeOf(() => win().markProcessed())).toBe('INVALID_STATE_TRANSITION');
+  test('vínculo de referência precisa ser coerente com a transação', () => {
+    const withRef = WagerTransaction.create(props({ kind: 'REFUND', referenceExternalTransactionId: 'bet-0' }));
+    expect(() => withRef.markProcessed(null, brl('1'))).toThrow(InvalidTransactionStateError);
+    const withoutRef = WagerTransaction.create(props());
+    expect(() => withoutRef.markProcessed('x', brl('1'))).toThrow(InvalidTransactionStateError);
+    expect(() => withoutRef.markPendingReference(brl('1'))).toThrow(InvalidTransactionStateError);
   });
 });
 
-describe('linkReference', () => {
-  function processedBet(overrides: Partial<ReceiveTransactionParams> = {}): WagerTransaction {
-    const b = bet(overrides);
-    b.markProcessed();
-    return b;
-  }
+describe('consultas de domínio', () => {
+  test('affectsBalance, requiresReference e direção do lançamento', () => {
+    const bet = WagerTransaction.create(props());
+    const win = WagerTransaction.create(props({ kind: 'WIN' }));
+    const loss = WagerTransaction.create(props({ kind: 'LOSS' }));
+    const refund = WagerTransaction.create(props({ kind: 'REFUND', referenceExternalTransactionId: 'bet-0' }));
+    const rollback = WagerTransaction.create(props({ kind: 'ROLLBACK', referenceExternalTransactionId: 'bet-0' }));
 
-  test('rejeita BET de outra carteira', () => {
-    expect(win().linkReference(processedBet({ walletId: 'wallet-2' }))).toBe('REFERENCE_WALLET_MISMATCH');
+    expect(loss.affectsBalance()).toBe(false);
+    expect([bet, win, refund, rollback].every((t) => t.affectsBalance())).toBe(true);
+    expect([refund, rollback].every((t) => t.requiresReference())).toBe(true);
+    expect([bet, win, loss].some((t) => t.requiresReference())).toBe(false);
+
+    expect(bet.ledgerDirectionFor()).toBe('DEBIT');
+    expect(win.ledgerDirectionFor()).toBe('CREDIT');
+    expect(refund.ledgerDirectionFor()).toBe('CREDIT');
+    expect(rollback.ledgerDirectionFor(bet)).toBe('CREDIT');
+    expect(rollback.ledgerDirectionFor(win)).toBe('DEBIT');
+    expect(rollback.ledgerDirectionFor(refund)).toBe('DEBIT');
+    expect(() => rollback.ledgerDirectionFor()).toThrow(InvalidTransactionStateError);
+    expect(() => loss.ledgerDirectionFor()).toThrow(InvalidTransactionStateError);
   });
 
-  test('rejeita BET em outra moeda', () => {
-    expect(win().linkReference(processedBet({ amount: Money.of('10', 'USD') }))).toBe('CURRENCY_MISMATCH');
-  });
-
-  test('rejeita BET que não foi processada', () => {
-    const rejectedBet = bet();
-    rejectedBet.reject('INSUFFICIENT_FUNDS');
-    expect(win().linkReference(rejectedBet)).toBe('REFERENCE_NOT_PROCESSED');
-  });
-
-  test('rejeita referência que não é BET', () => {
-    const otherWin = win({ idempotencyKey: 'bet-1', referenceKey: 'x' });
-    expect(win().linkReference(otherWin)).toBe('REFERENCE_NOT_A_BET');
-  });
-
-  test('a transação informada precisa ser a referenciada', () => {
-    expect(codeOf(() => win().linkReference(processedBet({ idempotencyKey: 'outra' })))).toBe('INVALID_TRANSACTION');
+  test('rehydrate reconstrói sem revalidar a forma', () => {
+    const original = WagerTransaction.create(props());
+    original.reject('INSUFFICIENT_FUNDS', brl('1'));
+    const copy = WagerTransaction.rehydrate({
+      ...original,
+      status: original.status,
+      referenceTransactionId: original.referenceTransactionId,
+      failureCode: original.failureCode,
+      processedAt: original.processedAt,
+      observedBalance: original.observedBalance,
+    });
+    expect(copy.status).toBe('REJECTED');
+    expect(copy.failureCode).toBe('INSUFFICIENT_FUNDS');
+    expect(copy.payloadHash).toBe(original.payloadHash);
   });
 });

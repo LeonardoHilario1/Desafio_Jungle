@@ -1,39 +1,33 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { resetDatabase } from '../support/database';
 import { checkInvariants } from '../support/invariants';
 import { startApi, type ApiResponse, type TestApi } from '../support/api';
+import { balanceOf, createWallet, submit, txBody, type TestWallet } from '../support/wagering';
 
-// Duas instâncias da aplicação, cada uma com o seu pool de conexões, sobre o mesmo
+// Três instâncias da aplicação, cada uma com o seu pool de conexões, sobre o mesmo
 // banco: o que vale entre requisições paralelas precisa valer entre instâncias.
-let instanceA: TestApi;
-let instanceB: TestApi;
+const INSTANCES = 3;
+let instances: TestApi[] = [];
 
 beforeAll(async () => {
-  [instanceA, instanceB] = await Promise.all([startApi(), startApi()]);
+  instances = await Promise.all(Array.from({ length: INSTANCES }, () => startApi()));
 });
 
 beforeEach(async () => {
-  await resetDatabase(instanceA.orm);
+  await resetDatabase(instances[0]!.orm);
+});
+
+// Invariante final de todos os cenários.
+afterEach(async () => {
+  expect(await checkInvariants(instances[0]!.orm)).toEqual([]);
 });
 
 afterAll(async () => {
-  await Promise.all([instanceA.close(), instanceB.close()]);
+  await Promise.all(instances.map((i) => i.close()));
 });
 
-const instances = () => [instanceA, instanceB];
-const sql = (query: string, params: unknown[] = []) => instanceA.orm.em.getConnection().execute(query, params);
-
-async function wallet(initialBalance: string): Promise<string> {
-  const res = await instanceA.post('/wallets', { playerId: `p-${crypto.randomUUID()}`, currency: 'BRL', initialBalance });
-  expect(res.status).toBe(201);
-  return res.body.id;
-}
-
-function submit(api: TestApi, key: string, body: Record<string, unknown>): Promise<ApiResponse> {
-  return api.post('/wagering/transactions', body, { 'idempotency-key': key });
-}
-
-const bet = (walletId: string, amount: string) => ({ walletId, type: 'BET', amount, currency: 'BRL' });
+const api = (n: number): TestApi => instances[n % INSTANCES]!;
+const sql = (query: string, params: unknown[] = []) => instances[0]!.orm.em.getConnection().execute(query, params);
 
 async function debits(walletId: string): Promise<number> {
   const [row] = await sql(
@@ -43,19 +37,15 @@ async function debits(walletId: string): Promise<number> {
   return row!.n as number;
 }
 
-async function balance(walletId: string): Promise<string> {
-  return (await instanceA.get(`/wallets/${walletId}`)).body.balance;
-}
-
 describe('concorrência', () => {
   // Repetido para aumentar a chance de pegar uma corrida, se houvesse.
   test.each(Array.from({ length: 10 }, (_, i) => i + 1))(
-    'saldo 100, duas BET de 80 em paralelo em instâncias diferentes (rodada %i)',
-    async () => {
-      const w = await wallet('100');
+    'cenário obrigatório: saldo 100.00, duas BET de 80.00 em paralelo em instâncias diferentes (rodada %i)',
+    async (round) => {
+      const w = await createWallet(api(0), '100.00');
       const results = await Promise.all([
-        submit(instanceA, `bet-a-${w}`, bet(w, '80')),
-        submit(instanceB, `bet-b-${w}`, bet(w, '80')),
+        submit(api(round), txBody(w, 'BET', '80.00')),
+        submit(api(round + 1), txBody(w, 'BET', '80.00')),
       ]);
 
       const processed = results.filter((r) => r.body.status === 'PROCESSED');
@@ -65,95 +55,99 @@ describe('concorrência', () => {
       expect(rejected).toHaveLength(1);
       expect(rejected[0]!.status).toBe(422);
       expect(rejected[0]!.body.failureCode).toBe('INSUFFICIENT_FUNDS');
-      expect(await balance(w)).toBe('20.00');
-      expect(await debits(w)).toBe(1);
-      expect(await checkInvariants(instanceA.orm)).toEqual([]);
+      expect(await balanceOf(api(0), w.id)).toBe('20.00');
+      expect(await debits(w.id)).toBe(1);
     },
   );
 
-  test('a mesma BET enviada 50 vezes em paralelo gera um único débito', async () => {
-    const w = await wallet('100');
-    const results = await Promise.all(
-      Array.from({ length: 50 }, (_, i) => submit(instances()[i % 2]!, 'mesma-bet', bet(w, '10'))),
-    );
+  test('a mesma BET enviada 50 vezes em paralelo por 3 instâncias gera um único débito', async () => {
+    const w = await createWallet(api(0), '100');
+    const body = txBody(w, 'BET', '10');
+    const results = await Promise.all(Array.from({ length: 50 }, (_, i) => submit(api(i), body)));
 
     expect(results.every((r) => r.status === 201)).toBe(true);
-    expect(new Set(results.map((r) => r.body.id)).size).toBe(1);
-    expect(results.filter((r) => r.headers.get('idempotent-replayed') === 'false')).toHaveLength(1);
-    expect(results.filter((r) => r.headers.get('idempotent-replayed') === 'true')).toHaveLength(49);
-    expect(await balance(w)).toBe('90.00');
-    expect(await debits(w)).toBe(1);
-    const [row] = await sql(`select count(*)::int as n from wager_transactions where idempotency_key = 'mesma-bet'`);
-    expect(row).toEqual({ n: 1 });
-    expect(await checkInvariants(instanceA.orm)).toEqual([]);
+    expect(new Set(results.map((r) => r.body.transactionId)).size).toBe(1);
+    expect(results.filter((r) => r.body.idempotentReplay === false)).toHaveLength(1);
+    expect(results.filter((r) => r.body.idempotentReplay === true)).toHaveLength(49);
+    // Todas as respostas mostram o saldo observado pela única aplicação.
+    expect(new Set(results.map((r) => r.body.balance.amount))).toEqual(new Set(['90.00']));
+    expect(await balanceOf(api(0), w.id)).toBe('90.00');
+    expect(await debits(w.id)).toBe(1);
   });
 
-  test('a mesma WIN enviada 50 vezes em paralelo gera um único crédito', async () => {
-    const w = await wallet('100');
-    await submit(instanceA, 'bet-1', bet(w, '10'));
-    const win = { walletId: w, type: 'WIN', amount: '25.50', currency: 'BRL', referenceKey: 'bet-1' };
-    const results = await Promise.all(Array.from({ length: 50 }, (_, i) => submit(instances()[i % 2]!, 'win-1', win)));
-
+  test('o mesmo REFUND enviado 30 vezes em paralelo gera um único crédito', async () => {
+    const w = await createWallet(api(0), '100');
+    await submit(api(0), txBody(w, 'BET', '40', { externalTransactionId: 'bet-1' }));
+    const refund = txBody(w, 'REFUND', '40', { reference: 'bet-1' });
+    const results = await Promise.all(Array.from({ length: 30 }, (_, i) => submit(api(i), refund)));
     expect(results.every((r) => r.status === 201)).toBe(true);
-    expect(await balance(w)).toBe('115.50');
-    expect(await checkInvariants(instanceA.orm)).toEqual([]);
+    expect(await balanceOf(api(0), w.id)).toBe('100.00');
   });
 
-  test('WIN e LOSS da mesma BET em paralelo: só uma liquida', async () => {
-    const w = await wallet('100');
-    await submit(instanceA, 'bet-1', bet(w, '10'));
-    const [winRes, lossRes] = await Promise.all([
-      submit(instanceA, 'win-1', { walletId: w, type: 'WIN', amount: '30', currency: 'BRL', referenceKey: 'bet-1' }),
-      submit(instanceB, 'loss-1', { walletId: w, type: 'LOSS', amount: '0', currency: 'BRL', referenceKey: 'bet-1' }),
+  test('REFUND e ROLLBACK da mesma BET em paralelo: só uma reversão', async () => {
+    const w = await createWallet(api(0), '100');
+    await submit(api(0), txBody(w, 'BET', '10', { externalTransactionId: 'bet-1' }));
+    const results = await Promise.all([
+      submit(api(1), txBody(w, 'REFUND', '10', { reference: 'bet-1' })),
+      submit(api(2), txBody(w, 'ROLLBACK', '10', { reference: 'bet-1' })),
     ]);
-
-    const statuses = [winRes!.body.status, lossRes!.body.status].sort();
-    expect(statuses).toEqual(['PROCESSED', 'REJECTED']);
-    const loser = winRes!.body.status === 'REJECTED' ? winRes! : lossRes!;
-    expect(loser.body.failureCode).toBe('BET_ALREADY_SETTLED');
-    expect(await balance(w)).toBe(winRes!.body.status === 'PROCESSED' ? '120.00' : '90.00');
-    expect(await checkInvariants(instanceA.orm)).toEqual([]);
+    expect(results.map((r) => r.body.status).sort()).toEqual(['PROCESSED', 'REJECTED']);
+    expect(results.find((r) => r.body.status === 'REJECTED')!.body.failureCode).toBe('REFERENCE_ALREADY_REVERSED');
+    expect(await balanceOf(api(0), w.id)).toBe('100.00');
   });
 
-  test('carga mista em várias carteiras, com replays, mantém todas as invariantes', async () => {
-    const wallets = await Promise.all(Array.from({ length: 5 }, () => wallet('50')));
+  test('hot wallet: 60 BET concorrentes de 3 instâncias nunca deixam saldo negativo', async () => {
+    const w = await createWallet(api(0), '100.00');
+    const results = await Promise.all(Array.from({ length: 60 }, (_, i) => submit(api(i), txBody(w, 'BET', '7.00'))));
+    const processed = results.filter((r) => r.body.status === 'PROCESSED');
+    expect(processed).toHaveLength(14);
+    expect(results.filter((r) => r.body.failureCode === 'INSUFFICIENT_FUNDS')).toHaveLength(46);
+    expect(await balanceOf(api(0), w.id)).toBe('2.00');
+    // Cada resposta processada viu um saldo distinto: as escritas foram serializadas.
+    expect(new Set(processed.map((r) => r.body.balance.amount)).size).toBe(14);
+  });
+
+  test('wallets distintas em paralelo: carga mista com replays e reversões mantém as invariantes', async () => {
+    const wallets: TestWallet[] = await Promise.all(Array.from({ length: 6 }, () => createWallet(api(0), '50')));
     const requests: Array<() => Promise<ApiResponse>> = [];
 
     for (const [wi, w] of wallets.entries()) {
-      for (let i = 0; i < 12; i++) {
-        const betKey = `bet-${wi}-${i}`;
+      for (let i = 0; i < 10; i++) {
+        const betId = `bet-${wi}-${i}`;
         // Valores que esgotam o saldo no meio do caminho, para gerar rejeições.
         const amount = `${(i % 4) + 3}.${i % 10}5`;
-        const settle =
+        const betBody = txBody(w, 'BET', amount, { externalTransactionId: betId });
+        const follow =
           i % 3 === 0
-            ? { walletId: w, type: 'LOSS', amount: '0', currency: 'BRL', referenceKey: betKey }
-            : { walletId: w, type: 'WIN', amount: `${i}.10`, currency: 'BRL', referenceKey: betKey };
-        const api = instances()[(wi + i) % 2]!;
-        requests.push(() => submit(api, betKey, bet(w, amount)));
-        requests.push(() => submit(api, `settle-${wi}-${i}`, settle));
-        // Replay da mesma BET pela outra instância.
-        requests.push(() => submit(instances()[(wi + i + 1) % 2]!, betKey, bet(w, amount)));
+            ? txBody(w, 'REFUND', amount, { reference: betId })
+            : i % 3 === 1
+              ? txBody(w, 'WIN', `${i}.10`, { reference: betId })
+              : txBody(w, 'LOSS', '0', { reference: betId });
+        const n = wi + i;
+        requests.push(() => submit(api(n), betBody));
+        requests.push(() => submit(api(n + 1), follow));
+        // Replay da mesma BET por outra instância.
+        requests.push(() => submit(api(n + 2), betBody));
       }
     }
 
-    // Embaralha para misturar BET, liquidação (às vezes antes da BET) e replays.
+    // Embaralha para misturar BET, dependentes (às vezes antes da BET) e replays.
     for (let i = requests.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [requests[i], requests[j]] = [requests[j]!, requests[i]!];
     }
     const results = await Promise.all(requests.map((r) => r()));
-
     expect(results.every((r) => [201, 202, 422].includes(r.status))).toBe(true);
-    expect(await checkInvariants(instanceA.orm)).toEqual([]);
   });
 });
 
 describe('checkInvariants', () => {
   // Garante que a verificação não é vazia: detecta uma divergência real.
   test('detecta saldo que não bate com o ledger', async () => {
-    const w = await wallet('100');
-    await sql('update wallets set balance = 99 where id = ?', [w]);
-    const violations = await checkInvariants(instanceA.orm);
+    const w = await createWallet(api(0), '100');
+    await sql('update wallets set balance = 99 where id = ?', [w.id]);
+    const violations = await checkInvariants(instances[0]!.orm);
     expect(violations.map((v) => v.rule)).toContain('saldo = ledger');
+    await sql('update wallets set balance = 100 where id = ?', [w.id]);
   });
 });

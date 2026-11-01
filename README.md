@@ -1,12 +1,14 @@
-# Distributed Wagering Processor (MVP)
+# Distributed Wagering Processor
 
-Serviço que recebe transações de apostas (BET, WIN, LOSS) de provedores de jogos,
-atualiza o saldo das carteiras e mantém um ledger imutável. Ele continua correto com
-mensagens repetidas, simultâneas e com várias instâncias rodando.
+Serviço que recebe transações de apostas (BET, WIN, LOSS, REFUND, ROLLBACK) de
+provedores de jogos, atualiza o saldo das carteiras e mantém um ledger imutável. Ele
+continua correto com mensagens repetidas, fora de ordem, simultâneas e com várias
+instâncias rodando.
 
 - **Decisões, trade-offs, limitações e a conferência das restrições do SPEC:**
   [ARCHITECTURE.md](ARCHITECTURE.md).
-- **Escopo original:** [SPEC.md](SPEC.md).
+- **Escopo original:** [SPEC.md](SPEC.md) (Etapas 1 a 7). Da Etapa 8 em diante, o
+  contrato segue o enunciado completo do desafio.
 
 ## Stack
 
@@ -35,38 +37,38 @@ A subida segue esta ordem:
 | --- | --- | --- |
 | GET | `/health/live` | 200 enquanto o processo está de pé |
 | GET | `/health/ready` | 200 se PostgreSQL e fila SQS respondem; 503 com o detalhe |
-| POST | `/wallets` | Cria carteira (`playerId`, `currency`, `initialBalance` opcional) |
-| GET | `/wallets/:id` | Consulta carteira e saldo |
-| POST | `/wagering/transactions` | BET, WIN ou LOSS; header `Idempotency-Key` obrigatório |
+| POST | `/wallets` | cria carteira: `playerId` e `initialBalance: { amount, currency }` |
+| GET | `/wallets/:walletId` | carteira e saldo |
+| POST | `/wagering/transactions` | BET, WIN, LOSS, REFUND, ROLLBACK; header `Idempotency-Key` obrigatório |
+| GET | `/wagering/transactions/:transactionId` | transação pelo id interno |
+| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | transação pelo id do provedor |
 
 ```bash
-# carteira com saldo inicial
-curl -s -X POST localhost:3000/wallets -H 'content-type: application/json' \
-  -d '{"playerId":"p1","currency":"BRL","initialBalance":"100.00"}'
+# carteira com saldo inicial (gera a transação interna OPENING)
+curl -s -X POST localhost:3000/wallets -H 'content-type: application/json'   -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
 
 # aposta (repetir com a mesma Idempotency-Key devolve a mesma resposta, sem debitar de novo)
-curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json' \
-  -H 'Idempotency-Key: bet-123' \
-  -d '{"walletId":"<id>","type":"BET","amount":"30.00","currency":"BRL"}'
+curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json'   -H 'Idempotency-Key: provider-a:transaction-123'   -d '{"providerId":"provider-a","externalTransactionId":"transaction-123",
+       "playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<id>",
+       "roundId":"round-987","gameId":"fortune-chimp","kind":"BET",
+       "money":{"amount":"25.00","currency":"BRL"}}'
+# → {"transactionId":"...","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":false}
 
-# ganho referenciando a aposta pela chave dela
-curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json' \
-  -H 'Idempotency-Key: win-123' \
-  -d '{"walletId":"<id>","type":"WIN","amount":"75.00","currency":"BRL","referenceKey":"bet-123"}'
-
-# perda: valor zero, só liquida a aposta (exige uma BET anterior com a chave bet-456;
-# se ela ainda não chegou, a resposta é 202 PENDING_REFERENCE)
-curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json' \
-  -H 'Idempotency-Key: loss-456' \
-  -d '{"walletId":"<id>","type":"LOSS","amount":"0","currency":"BRL","referenceKey":"bet-456"}'
+# reembolso da aposta, referenciada pelo id dela no provedor
+curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json'   -H 'Idempotency-Key: provider-a:refund-1'   -d '{"providerId":"provider-a","externalTransactionId":"refund-1",
+       "playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<id>",
+       "roundId":"round-987","gameId":"fortune-chimp","kind":"REFUND",
+       "money":{"amount":"25.00","currency":"BRL"},"referenceExternalTransactionId":"transaction-123"}'
 ```
 
-- **Valores monetários** são sempre **strings** com até 2 casas. Um `amount` numérico é
-  rejeitado.
-- **Respostas:** 201 (processada), 202 (aguardando a BET referenciada), 422 (recusada
-  por regra de negócio, com `failureCode`) e 409 (mesma chave com outro payload). A
-  tabela completa de status e códigos está no
-  [ARCHITECTURE.md](ARCHITECTURE.md#status-http).
+- **Valores monetários** são sempre `{ "amount": "<string>", "currency": "BRL" }`, com até
+  2 casas. Um `amount` numérico é rejeitado.
+- **Respostas:** 201 (processada), 202 (aguardando a referência), 422 (recusada por
+  regra de negócio, com `failureCode`), 409 (mesma chave com outro payload, ou mesmo id
+  externo com outra chave) e 503 (carteira ocupada; repetir com a mesma chave). A tabela
+  completa está no [ARCHITECTURE.md](ARCHITECTURE.md#status-http), e os códigos de falha
+  em [Códigos de falha](ARCHITECTURE.md#códigos-de-falha).
+- **`X-Correlation-Id`** (opcional) é gravado na transação e propagado aos eventos.
 
 Para ver os eventos publicados no SQS:
 
@@ -120,18 +122,20 @@ separado (`wagering_test`), sem mocks do banco.
 
 ```bash
 docker compose up -d postgres localstack
-bun test                     # 158 testes
+bun test                     # 244 testes
 bun run test:concurrency     # cenários de concorrência, 20 vezes
 ```
 
-- **Concorrência:** os testes sobem **duas instâncias da aplicação** sobre o mesmo banco
+- **Concorrência:** os testes sobem **três instâncias da aplicação** sobre o mesmo banco
   e conferem, no fim de cada cenário, que o saldo de cada carteira é igual ao saldo
-  reconstruído pelo ledger.
+  reconstruído pelo ledger, e que o ledger encadeia sem lacunas.
 - **Reset do banco:** as suítes recriam as tabelas do `wagering_test` a cada teste. O
   reset se recusa a rodar em bancos cujo nome não termina em `_test`.
 - **Criação do `wagering_test`:** é feita por `docker/postgres/init` na **primeira**
   subida do volume. Se o volume já existia antes desse script, recrie-o com
   `docker compose down -v`.
+- **Volume criado antes da Etapa 8:** as migrations do domínio foram consolidadas, então
+  o `migrate` falha num banco antigo. Recrie o volume com `docker compose down -v`.
 - **Endereços:** podem ser trocados com `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME` e
   `TEST_SQS_ENDPOINT`.
 
@@ -149,6 +153,8 @@ feito e por quê, e esperava a confirmação para seguir.
 - **Durante a implementação:** o saldo inicial como lançamento de abertura no ledger. A
   IA identificou que o SPEC não definia como a carteira recebe saldo e apresentou três
   opções; escolhi esta.
+- **Depois da Etapa 7:** comparar a entrega com o enunciado completo do desafio e
+  alinhar contrato, regras (REFUND/ROLLBACK), mensageria e observabilidade a ele.
 
 **Gerado pela IA**
 
@@ -171,12 +177,16 @@ feito e por quê, e esperava a confirmação para seguir.
 - **Etapa 3:** afirmou que a API pública do domínio não mudaria, mas ela mudou
   (`wallet.balance` virou `wallet.balance()`). A correção foi informada no resumo da
   etapa.
+- **Etapa 8:** a validação de `money` procurava a chave errada (`initialBalance.amount`
+  em vez de `amount`) e recusava todo valor bem formado. Os testes de integração da API
+  pegaram o erro antes do commit.
 
 **Verificação feita pela IA**
 
 - **Testes:** typecheck e suíte completa antes de cada commit. Testes de concorrência
   repetidos 20 vezes.
-- **Teste de mutação:** sem o `FOR UPDATE`, os testes de concorrência falham.
+- **Teste de mutação:** sem o `FOR UPDATE`, os testes de concorrência falham (13 de 16
+  na Etapa 8).
 - **Ponta a ponta:** cada etapa testada na stack do Compose.
 - **Restrições:** auditoria por busca (uso de `number` em dinheiro, caches em memória,
   locks).

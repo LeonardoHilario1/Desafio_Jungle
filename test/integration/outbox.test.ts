@@ -11,6 +11,7 @@ import { OutboxPublisher } from '../../src/outbox/outbox-publisher';
 import { startApi, type TestApi } from '../support/api';
 import { expectSqlState, resetDatabase } from '../support/database';
 import { testConfig } from '../support/test-config';
+import { createWallet, submit as submitTx, txBody, type TestWallet } from '../support/wagering';
 
 const config = testConfig();
 const sqs = new SQSClient({
@@ -46,22 +47,16 @@ afterAll(async () => {
 
 const sql = (query: string, params: unknown[] = []) => api.orm.em.getConnection().execute(query, params);
 
-async function wallet(initialBalance = '100'): Promise<string> {
-  const res = await api.post('/wallets', { playerId: `p-${crypto.randomUUID()}`, currency: 'BRL', initialBalance });
-  return res.body.id;
-}
-
-function submit(key: string, body: Record<string, unknown>) {
-  return api.post('/wagering/transactions', body, { 'idempotency-key': key });
-}
-
-const bet = (walletId: string, amount: string) => ({ walletId, type: 'BET', amount, currency: 'BRL' });
+const wallet = (initialBalance = '100'): Promise<TestWallet> => createWallet(api, initialBalance);
+const submit = (body: Record<string, unknown>) => submitTx(api, body);
+const bet = (w: TestWallet, amount: string) => txBody(w, 'BET', amount);
+const published = async (p: OutboxPublisher = publisher) => (await p.publishBatch()).published;
 
 async function outboxRows() {
   return sql(
     `select event_type, aggregate_id, payload, published_at, attempts, last_error,
             next_attempt_at > now() as delayed
-       from outbox_events order by created_at`,
+       from outbox_messages order by created_at, event_type`,
   );
 }
 
@@ -83,89 +78,103 @@ async function receiveAll(expected: number, timeoutMs = 10_000): Promise<Message
 }
 
 describe('gravação na mesma transação', () => {
-  test('cada transação gravada gera exatamente um evento, com valores em string', async () => {
+  test('cada resultado gera os seus eventos, com envelope versionado e valores em string', async () => {
     const w = await wallet('100');
-    const processed = await submit('bet-1', bet(w, '30'));
-    await submit('bet-2', bet(w, '500'));
-    await submit('win-1', { walletId: w, type: 'WIN', amount: '5', currency: 'BRL', referenceKey: 'nao-chegou' });
+    const before = (await outboxRows()).length; // OPENING: Processed + BalanceChanged
+    const processed = await submit(bet(w, '30'));
+    await submit(bet(w, '500'));
+    await submit(txBody(w, 'REFUND', '5', { reference: 'nao-chegou' }));
+    await submit(txBody(w, 'LOSS', '0'));
 
-    const rows = await outboxRows();
-    expect(rows.map((r) => r.event_type)).toEqual([
-      'wager.transaction.processed',
-      'wager.transaction.rejected',
-      'wager.transaction.pending_reference',
+    const rows = (await outboxRows()).slice(before);
+    expect(rows.map((r) => r.event_type).sort()).toEqual([
+      'WagerTransactionPendingReference',
+      'WagerTransactionProcessed',
+      'WagerTransactionProcessed',
+      'WagerTransactionRejected',
+      'WalletBalanceChanged',
     ]);
-    expect(rows[0]!.aggregate_id).toBe(processed.body.id);
-    expect(rows[0]!.payload).toMatchObject({
-      transactionId: processed.body.id,
-      idempotencyKey: 'bet-1',
-      type: 'BET',
-      amount: '30.00',
-      currency: 'BRL',
-      status: 'PROCESSED',
-      walletBalance: '70.00',
-      walletVersion: 3,
+    const changed = rows.find((r) => r.event_type === 'WalletBalanceChanged')!;
+    expect(changed.aggregate_id).toBe(w.id);
+    expect(changed.payload).toMatchObject({
+      eventType: 'WalletBalanceChanged',
+      version: 1,
+      aggregateId: w.id,
+      correlationId: expect.any(String),
+      data: {
+        walletId: w.id,
+        transactionId: processed.body.transactionId,
+        direction: 'DEBIT',
+        money: { amount: '30.00', currency: 'BRL' },
+        balanceBefore: { amount: '100.00', currency: 'BRL' },
+        balanceAfter: { amount: '70.00', currency: 'BRL' },
+        walletVersion: 2,
+      },
     });
-    expect(rows[1]!.payload).toMatchObject({ status: 'REJECTED', failureCode: 'INSUFFICIENT_FUNDS', walletBalance: '70.00' });
+    const rejected = rows.find((r) => r.event_type === 'WagerTransactionRejected')!;
+    expect(rejected.payload.data).toMatchObject({ failureCode: 'INSUFFICIENT_FUNDS', balance: { amount: '70.00' } });
+    // LOSS é processada mas não muda saldo: só um WalletBalanceChanged (o da BET).
     expect(rows.every((r) => r.published_at === null)).toBe(true);
   });
 
   test('replay, conflito e erros não geram evento', async () => {
     const w = await wallet('100');
-    await submit('bet-1', bet(w, '30'));
-    await submit('bet-1', bet(w, '30'));
-    await submit('bet-1', bet(w, '31'));
-    await submit('bet-x', bet(crypto.randomUUID(), '1'));
-    expect(await outboxRows()).toHaveLength(1);
+    const before = (await outboxRows()).length;
+    const body = bet(w, '30');
+    await submit(body);
+    await submit(body);
+    await submit({ ...body, money: { amount: '31', currency: 'BRL' } });
+    await submit(bet({ ...w, id: crypto.randomUUID() }, '1'));
+    expect((await outboxRows()).length - before).toBe(2);
   });
 });
 
 describe('publisher', () => {
-  test('publica no SQS e marca como publicado', async () => {
-    const w = await wallet('100');
-    const res = await submit('bet-1', bet(w, '30'));
+  test('publica o envelope no SQS e marca como publicado', async () => {
+    const w = await wallet('0');
+    const res = await submit(txBody(w, 'WIN', '30'));
 
-    expect(await publisher.publishBatch()).toBe(1);
-    expect(await publisher.publishBatch()).toBe(0);
+    expect(await published()).toBe(2);
+    expect(await published()).toBe(0);
 
-    const [message] = await receiveAll(1);
-    const [row] = await outboxRows();
-    expect(row!.published_at).not.toBeNull();
-    expect(JSON.parse(message!.Body!)).toMatchObject({ transactionId: res.body.id, amount: '30.00', status: 'PROCESSED' });
-    expect(message!.MessageAttributes?.eventType?.StringValue).toBe('wager.transaction.processed');
-    expect(message!.MessageAttributes?.eventId?.StringValue).toBe(JSON.parse(message!.Body!).eventId);
+    const messages = await receiveAll(2);
+    const processed = messages.find((m) => m.MessageAttributes?.eventType?.StringValue === 'WagerTransactionProcessed')!;
+    const body = JSON.parse(processed.Body!);
+    expect(body).toMatchObject({
+      eventType: 'WagerTransactionProcessed',
+      version: 1,
+      data: { transactionId: res.body.transactionId, money: { amount: '30.00', currency: 'BRL' }, kind: 'WIN' },
+    });
+    expect(processed.MessageAttributes?.eventId?.StringValue).toBe(body.eventId);
+    expect((await outboxRows()).every((r) => r.published_at !== null)).toBe(true);
   });
 
-  test('não publica evento de transação ainda não commitada', async () => {
-    const w = await wallet('100');
+  test('não publica mensagem de transação ainda não commitada', async () => {
+    const w = await wallet('0');
     await api.orm.em.fork().transactional(async (em) => {
-      const txId = crypto.randomUUID();
+      const id = crypto.randomUUID();
       await em.execute(
-        `insert into wager_transactions (id, idempotency_key, payload_hash, wallet_id, type, currency, amount, status)
-         values (?, 'uncommitted', repeat('a', 64), ?, 'BET', 'BRL', 1, 'PENDING')`,
-        [txId, w],
-      );
-      await em.execute(
-        `insert into outbox_events (id, event_type, aggregate_id, payload) values (gen_random_uuid(), 'x', ?, '{}')`,
-        [txId],
+        `insert into outbox_messages (id, aggregate_id, event_type, payload, occurred_at, next_attempt_at)
+         values (?, ?, 'X', jsonb_build_object('eventId', ?::text, 'eventType', 'X'), now(), now())`,
+        [id, w.id, id],
       );
       // Outra conexão, outra transação: a linha ainda não existe para o publisher.
-      expect(await publisher.publishBatch()).toBe(0);
+      expect(await published()).toBe(0);
     });
-    expect(await publisher.publishBatch()).toBe(1);
+    expect(await published()).toBe(1);
   });
 
-  test('vários publishers em paralelo publicam cada evento exatamente uma vez', async () => {
-    const wallets = await Promise.all(Array.from({ length: 5 }, () => wallet('100')));
-    for (const [i, w] of wallets.entries()) {
-      for (let j = 0; j < 5; j++) await submit(`bet-${i}-${j}`, bet(w, '1'));
+  test('vários publishers em paralelo publicam cada mensagem exatamente uma vez', async () => {
+    const wallets = await Promise.all(Array.from({ length: 5 }, () => wallet('0')));
+    for (const w of wallets) {
+      for (let j = 0; j < 5; j++) await submit(txBody(w, 'LOSS', '0'));
     }
 
     const publishers = Array.from({ length: 4 }, () => new OutboxPublisher(api.orm, sqs, queueName));
     const counts = await Promise.all(
       publishers.map(async (p) => {
         let total = 0;
-        for (let n = await p.publishBatch(); n > 0; n = await p.publishBatch()) total += n;
+        for (let n = await published(p); n > 0; n = await published(p)) total += n;
         return total;
       }),
     );
@@ -178,9 +187,9 @@ describe('publisher', () => {
     expect((await outboxRows()).every((r) => r.published_at !== null)).toBe(true);
   });
 
-  test('falha no SQS mantém o evento pendente e agenda nova tentativa com backoff', async () => {
-    const w = await wallet('100');
-    await submit('bet-1', bet(w, '30'));
+  test('falha no SQS mantém a mensagem pendente e agenda nova tentativa com backoff', async () => {
+    const w = await wallet('0');
+    await submit(txBody(w, 'LOSS', '0'));
 
     const broken = new SQSClient({
       region: 'us-east-1',
@@ -188,29 +197,43 @@ describe('publisher', () => {
       credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
       maxAttempts: 1,
     });
-    expect(await new OutboxPublisher(api.orm, broken, queueName).publishBatch()).toBe(0);
+    expect(await new OutboxPublisher(api.orm, broken, queueName).publishBatch()).toEqual({ published: 0, failed: 1 });
 
     const [row] = await outboxRows();
     expect(row).toMatchObject({ published_at: null, attempts: 1, delayed: true });
     expect(row!.last_error).toBeTruthy();
 
-    // Dentro do backoff, nem um publisher saudável pega o evento.
-    expect(await publisher.publishBatch()).toBe(0);
-    await sql('update outbox_events set next_attempt_at = now()');
-    expect(await publisher.publishBatch()).toBe(1);
+    // Dentro do backoff, nem um publisher saudável pega a mensagem.
+    expect(await published()).toBe(0);
+    await sql('update outbox_messages set next_attempt_at = now()');
+    expect(await published()).toBe(1);
+    expect(await receiveAll(1)).toHaveLength(1);
+  });
+
+  test('o processo morre depois do commit e antes de publicar: outra instância publica', async () => {
+    // A "instância que morreu" gravou e commitou, mas nunca publicou. Outra instância,
+    // com outro pool de conexões, assume o trabalho.
+    const w = await wallet('0');
+    await submit(txBody(w, 'LOSS', '0'));
+    const other = await startApi();
+    try {
+      expect(await new OutboxPublisher(other.orm, sqs, queueName).publishBatch()).toEqual({ published: 1, failed: 0 });
+    } finally {
+      await other.close();
+    }
     expect(await receiveAll(1)).toHaveLength(1);
   });
 });
 
-describe('imutabilidade do outbox', () => {
-  test('payload não muda, evento publicado não volta a pendente, nada é excluído', async () => {
-    const w = await wallet('100');
-    await submit('bet-1', bet(w, '30'));
-    await expectSqlState(sql(`update outbox_events set payload = '{}'`), 'P0001');
-    await expectSqlState(sql('delete from outbox_events'), 'P0001');
+describe('imutabilidade da outbox', () => {
+  test('payload não muda, mensagem publicada não volta a pendente, nada é excluído', async () => {
+    const w = await wallet('0');
+    await submit(txBody(w, 'LOSS', '0'));
+    await expectSqlState(sql(`update outbox_messages set payload = '{}'`), 'P0001');
+    await expectSqlState(sql('delete from outbox_messages'), 'P0001');
 
     await publisher.publishBatch();
-    await expectSqlState(sql('update outbox_events set published_at = null'), 'P0001');
+    await expectSqlState(sql('update outbox_messages set published_at = null, next_attempt_at = now()'), 'P0001');
   });
 });
 
@@ -223,8 +246,8 @@ describe('worker', () => {
     });
     await app.init();
     try {
-      const w = await wallet('100');
-      await submit('bet-1', bet(w, '30'));
+      const w = await wallet('0');
+      await submit(txBody(w, 'LOSS', '0'));
       expect(await receiveAll(1)).toHaveLength(1);
     } finally {
       await app.close();

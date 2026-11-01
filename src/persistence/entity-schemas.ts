@@ -1,141 +1,156 @@
-import { EntitySchema, type EntityCtor } from '@mikro-orm/core';
-import { WagerTransaction } from '../domain/wager-transaction';
-import { Wallet } from '../domain/wallet';
-import { WalletLedgerEntry } from '../domain/wallet-ledger-entry';
-import { OutboxEvent, type OutboxEventType, type OutboxPayload } from '../outbox/outbox-event';
-import type { FailureCode } from '../domain/domain-error';
-import type { LedgerDirection, LedgerEntryKind } from '../domain/wallet-ledger-entry';
-import type { TransactionStatus, WagerType } from '../domain/wager-transaction';
+import { EntitySchema } from '@mikro-orm/core';
 
 /*
- * Mapeamento sem decorators. O tipo de cada coluna é declarado explicitamente
- * (type + columnType), sem inferência por design:type. As tabelas e constraints vêm
- * das migrations SQL; este arquivo precisa refletir esse schema.
+ * Records de persistência: classes simples, uma por tabela, que o MikroORM gerencia
+ * (Unit of Work, Identity Map, LockMode). O domínio não depende delas nem do ORM; a
+ * conversão fica em mappers.ts.
  *
- * Os tipos *Row descrevem os campos persistidos, inclusive os privados das classes
- * de domínio, que o TypeScript não expõe em keyof. O cast em `class` é o único ponto
- * em que a tipagem é contornada.
+ * O tipo de cada coluna é declarado explicitamente (type + columnType), sem inferência
+ * por design:type. As tabelas e constraints vêm das migrations SQL; este arquivo precisa
+ * refletir esse schema.
  *
  * Valores numeric(18,2) são lidos e gravados como string: o driver pg devolve numeric
- * como string, e o domínio converte para Money. Nenhum valor monetário passa por number.
+ * como string, e os mappers convertem para Money. Nenhum valor monetário passa por number.
  */
 
 const decimal = { type: 'string', columnType: 'numeric(18,2)' } as const;
 const timestamptz = { type: 'Date', columnType: 'timestamptz' } as const;
+const text255 = { type: 'string', columnType: 'varchar(255)' } as const;
 
-interface WalletRow {
-  id: string;
-  playerId: string;
-  currency: string;
-  balanceAmount: string;
-  versionNumber: number;
-  createdAt: Date;
-  lastUpdatedAt: Date;
+export class WalletRecord {
+  id!: string;
+  playerId!: string;
+  currency!: string;
+  balance!: string;
+  version!: number;
+  createdAt!: Date;
+  updatedAt!: Date;
 }
 
-export const WalletSchema = new EntitySchema<WalletRow>({
-  class: Wallet as unknown as EntityCtor<WalletRow>,
+export const WalletSchema = new EntitySchema<WalletRecord>({
+  class: WalletRecord,
   tableName: 'wallets',
   properties: {
     id: { type: 'uuid', columnType: 'uuid', primary: true },
-    playerId: { type: 'string', columnType: 'varchar(255)', fieldName: 'player_id' },
+    playerId: { ...text255, fieldName: 'player_id' },
     currency: { type: 'string', columnType: 'char(3)' },
-    balanceAmount: { ...decimal, fieldName: 'balance' },
-    versionNumber: { type: 'integer', columnType: 'integer', fieldName: 'version' },
+    balance: { ...decimal },
+    version: { type: 'integer', columnType: 'integer' },
     createdAt: { ...timestamptz, fieldName: 'created_at' },
-    lastUpdatedAt: { ...timestamptz, fieldName: 'updated_at' },
+    updatedAt: { ...timestamptz, fieldName: 'updated_at' },
   },
 });
 
-interface WagerTransactionRow {
-  id: string;
-  idempotencyKey: string;
-  payloadHash: string;
-  walletId: string;
-  type: WagerType;
-  currency: string;
-  amountValue: string;
-  referenceKey: string | null;
-  referenceTransactionIdValue: string | null;
-  statusValue: TransactionStatus;
-  failureCodeValue: FailureCode | null;
-  createdAt: Date;
-  processedAtValue: Date | null;
+export class WagerTransactionRecord {
+  id!: string;
+  providerId!: string;
+  externalTransactionId!: string;
+  idempotencyKey!: string;
+  payloadHash!: string;
+  walletId!: string;
+  playerId!: string;
+  roundId!: string | null;
+  gameId!: string | null;
+  kind!: string;
+  currency!: string;
+  amount!: string;
+  referenceExternalTransactionId!: string | null;
+  referenceTransactionId!: string | null;
+  correlationId!: string;
+  status!: string;
+  failureCode!: string | null;
+  observedBalance!: string | null;
+  observedCurrency!: string | null;
+  createdAt!: Date;
+  processedAt!: Date | null;
 }
 
-export const WagerTransactionSchema = new EntitySchema<WagerTransactionRow>({
-  class: WagerTransaction as unknown as EntityCtor<WagerTransactionRow>,
+export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
+  class: WagerTransactionRecord,
   tableName: 'wager_transactions',
   properties: {
     id: { type: 'uuid', columnType: 'uuid', primary: true },
-    idempotencyKey: { type: 'string', columnType: 'varchar(255)', fieldName: 'idempotency_key' },
+    providerId: { ...text255, fieldName: 'provider_id' },
+    externalTransactionId: { ...text255, fieldName: 'external_transaction_id' },
+    idempotencyKey: { ...text255, fieldName: 'idempotency_key' },
     payloadHash: { type: 'string', columnType: 'char(64)', fieldName: 'payload_hash' },
     walletId: { type: 'uuid', columnType: 'uuid', fieldName: 'wallet_id' },
-    type: { type: 'string', columnType: 'varchar(16)' },
+    playerId: { ...text255, fieldName: 'player_id' },
+    roundId: { ...text255, fieldName: 'round_id', nullable: true },
+    gameId: { ...text255, fieldName: 'game_id', nullable: true },
+    kind: { type: 'string', columnType: 'varchar(16)' },
     currency: { type: 'string', columnType: 'char(3)' },
-    amountValue: { ...decimal, fieldName: 'amount' },
-    referenceKey: { type: 'string', columnType: 'varchar(255)', fieldName: 'reference_key', nullable: true },
-    referenceTransactionIdValue: {
-      type: 'uuid',
-      columnType: 'uuid',
-      fieldName: 'reference_transaction_id',
-      nullable: true,
-    },
-    statusValue: { type: 'string', columnType: 'varchar(32)', fieldName: 'status' },
-    failureCodeValue: { type: 'string', columnType: 'varchar(64)', fieldName: 'failure_code', nullable: true },
+    amount: { ...decimal },
+    referenceExternalTransactionId: { ...text255, fieldName: 'reference_external_transaction_id', nullable: true },
+    referenceTransactionId: { type: 'uuid', columnType: 'uuid', fieldName: 'reference_transaction_id', nullable: true },
+    correlationId: { ...text255, fieldName: 'correlation_id' },
+    status: { type: 'string', columnType: 'varchar(32)' },
+    failureCode: { type: 'string', columnType: 'varchar(64)', fieldName: 'failure_code', nullable: true },
+    observedBalance: { ...decimal, fieldName: 'observed_balance', nullable: true },
+    observedCurrency: { type: 'string', columnType: 'char(3)', fieldName: 'observed_currency', nullable: true },
     createdAt: { ...timestamptz, fieldName: 'created_at' },
-    processedAtValue: { ...timestamptz, fieldName: 'processed_at', nullable: true },
+    processedAt: { ...timestamptz, fieldName: 'processed_at', nullable: true },
   },
 });
 
-interface WalletLedgerEntryRow {
-  id: string;
-  walletId: string;
-  kind: LedgerEntryKind;
-  transactionId: string | null;
-  direction: LedgerDirection;
-  currency: string;
-  amountValue: string;
-  balanceAfterValue: string;
-  createdAt: Date;
+export class LedgerEntryRecord {
+  id!: string;
+  walletId!: string;
+  transactionId!: string;
+  direction!: string;
+  currency!: string;
+  amount!: string;
+  balanceBefore!: string;
+  balanceAfter!: string;
+  walletVersion!: number;
+  createdAt!: Date;
 }
 
-export const WalletLedgerEntrySchema = new EntitySchema<WalletLedgerEntryRow>({
-  class: WalletLedgerEntry as unknown as EntityCtor<WalletLedgerEntryRow>,
+export const LedgerEntrySchema = new EntitySchema<LedgerEntryRecord>({
+  class: LedgerEntryRecord,
   tableName: 'wallet_ledger_entries',
   properties: {
     id: { type: 'uuid', columnType: 'uuid', primary: true },
     walletId: { type: 'uuid', columnType: 'uuid', fieldName: 'wallet_id' },
-    kind: { type: 'string', columnType: 'varchar(16)' },
-    transactionId: { type: 'uuid', columnType: 'uuid', fieldName: 'transaction_id', nullable: true },
+    transactionId: { type: 'uuid', columnType: 'uuid', fieldName: 'transaction_id' },
     direction: { type: 'string', columnType: 'varchar(6)' },
     currency: { type: 'string', columnType: 'char(3)' },
-    amountValue: { ...decimal, fieldName: 'amount' },
-    balanceAfterValue: { ...decimal, fieldName: 'balance_after' },
+    amount: { ...decimal },
+    balanceBefore: { ...decimal, fieldName: 'balance_before' },
+    balanceAfter: { ...decimal, fieldName: 'balance_after' },
+    walletVersion: { type: 'integer', columnType: 'integer', fieldName: 'wallet_version' },
     createdAt: { ...timestamptz, fieldName: 'created_at' },
   },
 });
 
-interface OutboxEventRow {
-  id: string;
-  eventType: OutboxEventType;
-  aggregateId: string;
-  payload: OutboxPayload;
-  createdAt: Date;
+export class OutboxMessageRecord {
+  id!: string;
+  aggregateId!: string;
+  eventType!: string;
+  payload!: Record<string, unknown>;
+  occurredAt!: Date;
+  attempts!: number;
+  nextAttemptAt!: Date | null;
+  publishedAt!: Date | null;
+  /** Diagnóstico do publisher; não faz parte do domínio. */
+  lastError: string | null = null;
 }
 
-// Só os campos de criação. O controle de publicação (published_at, attempts,
-// next_attempt_at, last_error) é gerido pelo publisher com SQL direto.
-export const OutboxEventSchema = new EntitySchema<OutboxEventRow>({
-  class: OutboxEvent as unknown as EntityCtor<OutboxEventRow>,
-  tableName: 'outbox_events',
+// created_at fica só no banco (default now()).
+export const OutboxMessageSchema = new EntitySchema<OutboxMessageRecord>({
+  class: OutboxMessageRecord,
+  tableName: 'outbox_messages',
   properties: {
     id: { type: 'uuid', columnType: 'uuid', primary: true },
-    eventType: { type: 'string', columnType: 'varchar(64)', fieldName: 'event_type' },
     aggregateId: { type: 'uuid', columnType: 'uuid', fieldName: 'aggregate_id' },
+    eventType: { type: 'string', columnType: 'varchar(64)', fieldName: 'event_type' },
     payload: { type: 'json', columnType: 'jsonb' },
-    createdAt: { ...timestamptz, fieldName: 'created_at' },
+    occurredAt: { ...timestamptz, fieldName: 'occurred_at' },
+    attempts: { type: 'integer', columnType: 'integer' },
+    nextAttemptAt: { ...timestamptz, fieldName: 'next_attempt_at', nullable: true },
+    publishedAt: { ...timestamptz, fieldName: 'published_at', nullable: true },
+    lastError: { type: 'text', columnType: 'text', fieldName: 'last_error', nullable: true },
   },
 });
 
-export const entitySchemas = [WalletSchema, WagerTransactionSchema, WalletLedgerEntrySchema, OutboxEventSchema];
+export const entitySchemas = [WalletSchema, WagerTransactionSchema, LedgerEntrySchema, OutboxMessageSchema];

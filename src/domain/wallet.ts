@@ -1,104 +1,148 @@
 import { DomainError } from './domain-error';
 import { Money } from './money';
-import { WalletLedgerEntry } from './wallet-ledger-entry';
+import { WagerTransaction } from './wager-transaction';
+import { WalletLedgerEntry, type LedgerDirection } from './wallet-ledger-entry';
 
 const MAX_PLAYER_ID_LENGTH = 255;
 
+export interface WalletState {
+  id: string;
+  playerId: string;
+  currency: string;
+  balance: Money;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Carteira recém-aberta e, se houve saldo inicial, a transação OPENING e o seu lançamento. */
+export interface OpenedWallet {
+  wallet: Wallet;
+  opening: { transaction: WagerTransaction; entry: WalletLedgerEntry } | null;
+}
+
 /**
- * Carteira de um jogador em uma moeda. O saldo só muda por debit/credit, que validam
- * a regra, incrementam version e devolvem o lançamento de ledger correspondente.
- * A exclusão mútua entre requisições concorrentes é feita pelo banco
- * (SELECT ... FOR UPDATE), não por esta classe.
- *
- * O estado mutável fica em campos privados com tipos primitivos (o saldo em string
- * decimal), que é o que o MikroORM persiste; Money é exposto só pelo getter.
+ * Aggregate root: carteira de um jogador em uma moeda. O saldo só muda por debit/credit,
+ * que incrementam version e devolvem o lançamento de ledger correspondente, de modo que
+ * saldo e ledger nunca divergem. A exclusão mútua entre instâncias é do banco
+ * (SELECT ... FOR UPDATE), não desta classe.
  */
 export class Wallet {
   private constructor(
     readonly id: string,
     readonly playerId: string,
     readonly currency: string,
-    private balanceAmount: string,
-    private versionNumber: number,
+    private _balance: Money,
+    private _version: number,
     readonly createdAt: Date,
-    private lastUpdatedAt: Date,
+    private _updatedAt: Date,
   ) {}
 
-  static open(params: { playerId: string; currency: string }): Wallet {
-    const playerId = typeof params.playerId === 'string' ? params.playerId.trim() : '';
+  /**
+   * Abre a carteira com version 1. Saldo inicial maior que zero gera uma transação
+   * interna OPENING, já PROCESSED, e um lançamento CREDIT de 0 até o saldo inicial; os
+   * três devem ser gravados na mesma transação SQL.
+   */
+  static open(props: { id?: string; playerId: string; initialBalance: Money; at?: Date }): OpenedWallet {
+    const playerId = typeof props.playerId === 'string' ? props.playerId.trim() : '';
     if (playerId === '' || playerId.length > MAX_PLAYER_ID_LENGTH) {
       throw new DomainError('INVALID_WALLET', `playerId deve ter de 1 a ${MAX_PLAYER_ID_LENGTH} caracteres`);
     }
-    const balance = Money.zero(params.currency);
-    const now = new Date();
-    return new Wallet(crypto.randomUUID(), playerId, balance.currency, balance.amount, 1, now, now);
-  }
-
-  /**
-   * Abre a carteira já com saldo. O saldo inicial entra no ledger como lançamento de
-   * abertura, que deve ser gravado junto com a carteira.
-   */
-  static openWithBalance(params: { playerId: string; initialBalance: Money }): {
-    wallet: Wallet;
-    openingEntry: WalletLedgerEntry;
-  } {
-    const wallet = Wallet.open({ playerId: params.playerId, currency: params.initialBalance.currency });
-    const openingEntry = wallet.change('CREDIT', params.initialBalance, params.initialBalance, null);
-    return { wallet, openingEntry };
-  }
-
-  balance(): Money {
-    return Money.of(this.balanceAmount, this.currency);
-  }
-
-  version(): number {
-    return this.versionNumber;
-  }
-
-  updatedAt(): Date {
-    return this.lastUpdatedAt;
-  }
-
-  canDebit(amount: Money): boolean {
-    this.assertCurrency(amount);
-    return !this.balance().isLessThan(amount);
-  }
-
-  debit(amount: Money, transactionId: string): WalletLedgerEntry {
-    if (!this.canDebit(amount)) {
-      throw new DomainError('INSUFFICIENT_FUNDS', `Saldo ${this.balance()} insuficiente para debitar ${amount}`);
+    if (props.initialBalance.isNegative()) {
+      throw new DomainError('INVALID_WALLET', 'Saldo inicial não pode ser negativo');
     }
-    return this.change('DEBIT', amount, this.balance().subtract(amount), transactionId);
+    const at = props.at ?? new Date();
+    const wallet = new Wallet(
+      props.id ?? crypto.randomUUID(),
+      playerId,
+      props.initialBalance.currency,
+      props.initialBalance,
+      1,
+      at,
+      at,
+    );
+    if (props.initialBalance.isZero()) {
+      return { wallet, opening: null };
+    }
+    const transaction = WagerTransaction.opening({ walletId: wallet.id, playerId, money: props.initialBalance, at });
+    const entry = WalletLedgerEntry.create({
+      walletId: wallet.id,
+      transactionId: transaction.id,
+      direction: 'CREDIT',
+      money: props.initialBalance,
+      balanceBefore: Money.zero(wallet.currency),
+      balanceAfter: props.initialBalance,
+      walletVersion: 1,
+      createdAt: at,
+    });
+    return { wallet, opening: { transaction, entry } };
   }
 
-  credit(amount: Money, transactionId: string): WalletLedgerEntry {
-    this.assertCurrency(amount);
-    return this.change('CREDIT', amount, this.balance().add(amount), transactionId);
+  /** Reconstrução a partir da persistência: não revalida. */
+  static rehydrate(state: WalletState): Wallet {
+    return new Wallet(
+      state.id,
+      state.playerId,
+      state.currency,
+      state.balance,
+      state.version,
+      state.createdAt,
+      state.updatedAt,
+    );
   }
 
-  private change(
-    direction: 'DEBIT' | 'CREDIT',
-    amount: Money,
-    newBalance: Money,
-    transactionId: string | null,
-  ): WalletLedgerEntry {
+  get balance(): Money {
+    return this._balance;
+  }
+
+  get version(): number {
+    return this._version;
+  }
+
+  get updatedAt(): Date {
+    return this._updatedAt;
+  }
+
+  canDebit(money: Money): boolean {
+    this.assertSameCurrency(money);
+    return !this._balance.isLessThan(money);
+  }
+
+  /** Lança INSUFFICIENT_FUNDS se o saldo não cobrir; quem decide a rejeição consulta canDebit antes. */
+  debit(money: Money, transactionId: string, at: Date = new Date()): WalletLedgerEntry {
+    if (!this.canDebit(money)) {
+      throw new DomainError('INSUFFICIENT_FUNDS', `Saldo ${this._balance} insuficiente para debitar ${money}`);
+    }
+    return this.apply('DEBIT', money, transactionId, at);
+  }
+
+  credit(money: Money, transactionId: string, at: Date = new Date()): WalletLedgerEntry {
+    this.assertSameCurrency(money);
+    return this.apply('CREDIT', money, transactionId, at);
+  }
+
+  private apply(direction: LedgerDirection, money: Money, transactionId: string, at: Date): WalletLedgerEntry {
+    const balanceAfter = direction === 'CREDIT' ? this._balance.add(money) : this._balance.subtract(money);
     // Cria o lançamento antes de alterar o estado: se a validação falhar, a carteira fica intacta.
-    const entry = WalletLedgerEntry.record({
+    const entry = WalletLedgerEntry.create({
       walletId: this.id,
       transactionId,
       direction,
-      amount,
-      balanceAfter: newBalance,
+      money,
+      balanceBefore: this._balance,
+      balanceAfter,
+      walletVersion: this._version + 1,
+      createdAt: at,
     });
-    this.balanceAmount = newBalance.amount;
-    this.versionNumber += 1;
-    this.lastUpdatedAt = new Date();
+    this._balance = balanceAfter;
+    this._version += 1;
+    this._updatedAt = at;
     return entry;
   }
 
-  private assertCurrency(amount: Money): void {
-    if (amount.currency !== this.currency) {
-      throw new DomainError('CURRENCY_MISMATCH', `Carteira em ${this.currency}, valor em ${amount.currency}`);
+  private assertSameCurrency(money: Money): void {
+    if (money.currency !== this.currency) {
+      throw new DomainError('CURRENCY_MISMATCH', `Carteira em ${this.currency}, valor em ${money.currency}`);
     }
   }
 }

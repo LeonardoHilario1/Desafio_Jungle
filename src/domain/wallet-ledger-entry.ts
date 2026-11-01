@@ -1,69 +1,89 @@
 import { DomainError } from './domain-error';
 import { Money } from './money';
 
-export type LedgerDirection = 'DEBIT' | 'CREDIT';
+export const LEDGER_DIRECTIONS = ['DEBIT', 'CREDIT'] as const;
+export type LedgerDirection = (typeof LEDGER_DIRECTIONS)[number];
 
-/** TRANSACTION: efeito de uma transação de aposta. OPENING: saldo inicial da carteira. */
-export type LedgerEntryKind = 'TRANSACTION' | 'OPENING';
+export interface LedgerEntryState {
+  id: string;
+  walletId: string;
+  transactionId: string;
+  direction: LedgerDirection;
+  money: Money;
+  balanceBefore: Money;
+  balanceAfter: Money;
+  /** version da carteira depois deste lançamento; ordena o ledger de cada carteira. */
+  walletVersion: number;
+  createdAt: Date;
+}
+
+export type CreateLedgerEntryProps = Omit<LedgerEntryState, 'id' | 'createdAt'> & { id?: string; createdAt?: Date };
 
 /**
- * Lançamento imutável do ledger. Só nasce por Wallet.debit/credit, para que toda
- * mudança de saldo tenha exatamente um lançamento. No banco, UPDATE, DELETE e
- * TRUNCATE são bloqueados por trigger.
- *
- * O lançamento de abertura (OPENING) registra o saldo inicial: é sempre CREDIT e não
- * tem transação de aposta, o que mantém saldo = soma do ledger desde o primeiro dia.
+ * Lançamento imutável do ledger: sem campos mutáveis nem métodos de transição. No banco,
+ * UPDATE, DELETE e TRUNCATE são bloqueados por trigger, e um CHECK repete a aritmética
+ * balance_before ± amount = balance_after.
  */
 export class WalletLedgerEntry {
   private constructor(
     readonly id: string,
     readonly walletId: string,
-    readonly kind: LedgerEntryKind,
-    readonly transactionId: string | null,
+    readonly transactionId: string,
     readonly direction: LedgerDirection,
-    readonly currency: string,
-    private readonly amountValue: string,
-    private readonly balanceAfterValue: string,
+    readonly money: Money,
+    readonly balanceBefore: Money,
+    readonly balanceAfter: Money,
+    readonly walletVersion: number,
     readonly createdAt: Date,
-  ) {}
+  ) {
+    Object.freeze(this);
+  }
 
-  /** Uso interno de Wallet; não chamar diretamente. */
-  static record(params: {
-    walletId: string;
-    /** null apenas no lançamento de abertura. */
-    transactionId: string | null;
-    direction: LedgerDirection;
-    amount: Money;
-    balanceAfter: Money;
-  }): WalletLedgerEntry {
-    if (params.amount.isZero()) {
-      throw new DomainError('INVALID_AMOUNT', 'Lançamento de ledger com valor zero');
+  /** Valida o lançamento: valor positivo, saldos não negativos, mesma moeda e aritmética fechada. */
+  static create(props: CreateLedgerEntryProps): WalletLedgerEntry {
+    const entry = WalletLedgerEntry.rehydrate({
+      ...props,
+      id: props.id ?? crypto.randomUUID(),
+      createdAt: props.createdAt ?? new Date(),
+    });
+    if (!LEDGER_DIRECTIONS.includes(entry.direction)) {
+      throw new DomainError('INVALID_LEDGER_ENTRY', `Direção inválida: ${entry.direction}`);
     }
-    const kind: LedgerEntryKind = params.transactionId === null ? 'OPENING' : 'TRANSACTION';
-    if (kind === 'OPENING' && params.direction !== 'CREDIT') {
-      throw new DomainError('INVALID_AMOUNT', 'Lançamento de abertura deve ser CREDIT');
+    if (!Number.isInteger(entry.walletVersion) || entry.walletVersion < 1) {
+      throw new DomainError('INVALID_LEDGER_ENTRY', 'walletVersion deve ser inteiro >= 1');
     }
-    if (params.amount.currency !== params.balanceAfter.currency) {
-      throw new DomainError('CURRENCY_MISMATCH', 'Valor e saldo do lançamento em moedas diferentes');
+    if (!entry.money.isPositive()) {
+      throw new DomainError('INVALID_LEDGER_ENTRY', 'Lançamento deve ter valor maior que zero');
     }
+    if (entry.balanceBefore.isNegative() || entry.balanceAfter.isNegative()) {
+      throw new DomainError('INVALID_LEDGER_ENTRY', 'Lançamento não pode deixar saldo negativo');
+    }
+    // add/subtract lançam CURRENCY_MISMATCH se as moedas divergirem.
+    if (!entry.isBalanced()) {
+      throw new DomainError('INVALID_LEDGER_ENTRY', 'balanceBefore ± money deve ser igual a balanceAfter');
+    }
+    return entry;
+  }
+
+  /** Reconstrução a partir da persistência: não revalida. */
+  static rehydrate(state: LedgerEntryState): WalletLedgerEntry {
     return new WalletLedgerEntry(
-      crypto.randomUUID(),
-      params.walletId,
-      kind,
-      params.transactionId,
-      params.direction,
-      params.amount.currency,
-      params.amount.amount,
-      params.balanceAfter.amount,
-      new Date(),
+      state.id,
+      state.walletId,
+      state.transactionId,
+      state.direction,
+      state.money,
+      state.balanceBefore,
+      state.balanceAfter,
+      state.walletVersion,
+      state.createdAt,
     );
   }
 
-  amount(): Money {
-    return Money.of(this.amountValue, this.currency);
-  }
-
-  balanceAfter(): Money {
-    return Money.of(this.balanceAfterValue, this.currency);
+  /** balanceBefore ± money === balanceAfter. */
+  isBalanced(): boolean {
+    const expected =
+      this.direction === 'CREDIT' ? this.balanceBefore.add(this.money) : this.balanceBefore.subtract(this.money);
+    return expected.equals(this.balanceAfter);
   }
 }

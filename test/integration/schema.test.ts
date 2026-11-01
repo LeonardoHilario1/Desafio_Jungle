@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import { ProcessWagerTransaction, type WagerTransactionCommand } from '../../src/application/process-wager-transaction';
 import { Money } from '../../src/domain/money';
-import { WagerTransaction } from '../../src/domain/wager-transaction';
 import { Wallet } from '../../src/domain/wallet';
-import { WalletLedgerEntry } from '../../src/domain/wallet-ledger-entry';
+import { MikroOrmWageringUnitOfWork } from '../../src/persistence/mikro-orm-wagering-store';
 import { expectSqlState, initTestOrm, resetDatabase } from '../support/database';
 
 // SQLSTATEs do PostgreSQL usados nas asserções.
@@ -13,9 +13,13 @@ const FOREIGN_KEY_VIOLATION = '23503';
 const RAISED_EXCEPTION = 'P0001';
 
 let orm: MikroORM;
+let uow: MikroOrmWageringUnitOfWork;
+let processWager: ProcessWagerTransaction;
 
 beforeAll(async () => {
   orm = await initTestOrm();
+  uow = new MikroOrmWageringUnitOfWork(orm);
+  processWager = new ProcessWagerTransaction(uow);
 });
 
 beforeEach(async () => {
@@ -27,85 +31,127 @@ afterAll(async () => {
 });
 
 const sql = (query: string, params: unknown[] = []) => orm.em.getConnection().execute(query, params);
+const brl = (amount: string) => Money.from({ amount, currency: 'BRL' });
 
-async function save(...entities: object[]): Promise<void> {
-  const em = orm.em.fork();
-  em.persist(entities);
-  await em.flush();
+async function openWallet(amount = '100', playerId = `player-${crypto.randomUUID()}`): Promise<Wallet> {
+  const opened = Wallet.open({ playerId, initialBalance: brl(amount) });
+  await uow.run((store) => store.insertWallet(opened, []));
+  return opened.wallet;
 }
 
-/** Carteira com saldo, BET processada e o lançamento de débito, gravados pelo ORM. */
-async function walletWithProcessedBet(initial = '100', betAmount = '30') {
-  const em = orm.em.fork();
-  const wallet = Wallet.open({ playerId: `player-${crypto.randomUUID()}`, currency: 'BRL' });
-  // Saldo inicial direto pelo domínio, sem lançamento gravado: aqui só importa o schema.
-  wallet.credit(Money.of(initial, 'BRL'), crypto.randomUUID());
-  await em.persist(wallet).flush();
+let seq = 0;
+async function wager(wallet: Wallet, overrides: Partial<WagerTransactionCommand> = {}) {
+  seq += 1;
+  const externalTransactionId = overrides.externalTransactionId ?? `tx-${seq}`;
+  const { transaction } = await processWager.execute(
+    {
+      idempotencyKey: `provider-a:${externalTransactionId}`,
+      providerId: 'provider-a',
+      playerId: wallet.playerId,
+      walletId: wallet.id,
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: 'BET',
+      money: { amount: '10', currency: 'BRL' },
+      referenceExternalTransactionId: null,
+      ...overrides,
+      externalTransactionId,
+    },
+    { correlationId: 'corr' },
+  );
+  return transaction;
+}
 
-  const bet = WagerTransaction.receive({
-    idempotencyKey: `bet-${crypto.randomUUID()}`,
-    walletId: wallet.id,
-    type: 'BET',
-    amount: Money.of(betAmount, 'BRL'),
-    referenceKey: null,
-  });
-  const entry = wallet.debit(bet.amount(), bet.id);
-  bet.markProcessed();
-  // Um flush por entidade, na ordem das FKs (o mapeamento não declara relações).
-  await em.persist(bet).flush();
-  await em.persist(entry).flush();
-  return { wallet, bet, entry };
+/** INSERT direto em wager_transactions com uma linha válida; cada teste muda só o que testa. */
+function insertTransaction(wallet: Wallet, overrides: Record<string, unknown> = {}) {
+  seq += 1;
+  const row: Record<string, unknown> = {
+    id: crypto.randomUUID(),
+    provider_id: 'provider-a',
+    external_transaction_id: `raw-${seq}`,
+    idempotency_key: `raw-key-${seq}`,
+    payload_hash: 'a'.repeat(64),
+    wallet_id: wallet.id,
+    player_id: wallet.playerId,
+    round_id: 'round-1',
+    game_id: 'game-1',
+    kind: 'BET',
+    currency: 'BRL',
+    amount: '10',
+    correlation_id: 'corr',
+    status: 'PENDING',
+    ...overrides,
+  };
+  const columns = Object.keys(row);
+  return sql(
+    `insert into wager_transactions (${columns.join(', ')}) values (${columns.map(() => '?').join(', ')})`,
+    Object.values(row),
+  ).then(() => row.id as string);
+}
+
+function insertEntry(wallet: Wallet, transactionId: string, overrides: Record<string, unknown> = {}) {
+  const row: Record<string, unknown> = {
+    id: crypto.randomUUID(),
+    wallet_id: wallet.id,
+    transaction_id: transactionId,
+    direction: 'DEBIT',
+    currency: 'BRL',
+    amount: '10',
+    balance_before: '100',
+    balance_after: '90',
+    wallet_version: 50,
+    ...overrides,
+  };
+  const columns = Object.keys(row);
+  return sql(
+    `insert into wallet_ledger_entries (${columns.join(', ')}) values (${columns.map(() => '?').join(', ')})`,
+    Object.values(row),
+  );
 }
 
 describe('mapeamento ORM', () => {
-  test('grava e relê as entidades com Money em string e version', async () => {
-    const { wallet, bet, entry } = await walletWithProcessedBet('100', '80');
+  test('grava e relê carteira, transação e lançamento com Money exato', async () => {
+    const wallet = await openWallet('100');
+    const bet = await wager(wallet, { money: { amount: '80', currency: 'BRL' } });
 
-    const em = orm.em.fork();
-    const loadedWallet = await em.findOneOrFail(Wallet, { id: wallet.id });
-    const loadedBet = await em.findOneOrFail(WagerTransaction, { id: bet.id });
-    const loadedEntry = await em.findOneOrFail(WalletLedgerEntry, { id: entry.id });
-
-    expect(loadedWallet).toBeInstanceOf(Wallet);
-    expect(loadedWallet.balance().equals(Money.of('20', 'BRL'))).toBe(true);
-    expect(loadedWallet.version()).toBe(3);
-
-    expect(loadedBet).toBeInstanceOf(WagerTransaction);
-    expect(loadedBet.status()).toBe('PROCESSED');
-    expect(loadedBet.amount().amount).toBe('80.00');
-    expect(loadedBet.payloadHash).toBe(bet.payloadHash);
-
-    expect(loadedEntry.direction).toBe('DEBIT');
-    expect(loadedEntry.amount().amount).toBe('80.00');
-    expect(loadedEntry.balanceAfter().amount).toBe('20.00');
+    const reloaded = await uow.read(async (store) => ({
+      wallet: await store.findWallet(wallet.id),
+      bet: await store.findTransaction(bet.id),
+    }));
+    expect(reloaded.wallet!.balance.equals(brl('20'))).toBe(true);
+    expect(reloaded.wallet!.version).toBe(2);
+    expect(reloaded.bet!.status).toBe('PROCESSED');
+    expect(reloaded.bet!.money.amount).toBe('80.00');
+    expect(reloaded.bet!.observedBalance!.amount).toBe('20.00');
+    expect(reloaded.bet!.payloadHash).toBe(bet.payloadHash);
 
     // O driver devolve numeric como string; nada passa por number.
-    const [raw] = await sql('select balance from wallets where id = ?', [wallet.id]);
-    expect(raw).toEqual({ balance: '20.00' });
-  });
-
-  test('alteração de saldo pelo ORM grava balance e version', async () => {
-    const { wallet } = await walletWithProcessedBet('100', '30');
-    const em = orm.em.fork();
-    const loaded = await em.findOneOrFail(Wallet, { id: wallet.id });
-    const before = loaded.version();
-    loaded.credit(Money.of('5', 'BRL'), crypto.randomUUID());
-    await em.flush();
-
-    const [raw] = await sql('select balance, version from wallets where id = ?', [wallet.id]);
-    expect(raw).toEqual({ balance: '75.00', version: before + 1 });
+    const rows = await sql(
+      `select direction, amount, balance_before, balance_after, wallet_version from wallet_ledger_entries
+        where wallet_id = ? order by wallet_version`,
+      [wallet.id],
+    );
+    expect(rows).toEqual([
+      { direction: 'CREDIT', amount: '100.00', balance_before: '0.00', balance_after: '100.00', wallet_version: 1 },
+      { direction: 'DEBIT', amount: '80.00', balance_before: '100.00', balance_after: '20.00', wallet_version: 2 },
+    ]);
   });
 });
 
 describe('wallets', () => {
   test('uma carteira por jogador e moeda', async () => {
-    await save(Wallet.open({ playerId: 'p1', currency: 'BRL' }));
-    await save(Wallet.open({ playerId: 'p1', currency: 'USD' }));
-    await expectSqlState(save(Wallet.open({ playerId: 'p1', currency: 'BRL' })), UNIQUE_VIOLATION, 'wallets_player_currency_uq');
+    await openWallet('0', 'p1');
+    const usd = Wallet.open({ playerId: 'p1', initialBalance: Money.from({ amount: '0', currency: 'USD' }) });
+    await uow.run((store) => store.insertWallet(usd, []));
+    await expectSqlState(
+      sql(`insert into wallets (id, player_id, currency, balance, version) values (gen_random_uuid(), 'p1', 'BRL', 0, 1)`),
+      UNIQUE_VIOLATION,
+      'wallets_player_currency_uq',
+    );
   });
 
   test('saldo não pode ficar negativo', async () => {
-    const { wallet } = await walletWithProcessedBet();
+    const wallet = await openWallet();
     await expectSqlState(
       sql('update wallets set balance = -0.01 where id = ?', [wallet.id]),
       CHECK_VIOLATION,
@@ -115,7 +161,7 @@ describe('wallets', () => {
 
   test('moeda precisa ser ISO de 3 letras', async () => {
     await expectSqlState(
-      sql(`insert into wallets (id, player_id, currency) values (gen_random_uuid(), 'p', 'br1')`),
+      sql(`insert into wallets (id, player_id, currency, balance, version) values (gen_random_uuid(), 'p', 'br1', 0, 1)`),
       CHECK_VIOLATION,
       'wallets_currency_ck',
     );
@@ -123,188 +169,224 @@ describe('wallets', () => {
 });
 
 describe('wager_transactions', () => {
-  test('idempotency_key é única', async () => {
-    const { wallet, bet } = await walletWithProcessedBet();
-    const duplicate = WagerTransaction.receive({
-      idempotencyKey: bet.idempotencyKey,
-      walletId: wallet.id,
-      type: 'BET',
-      amount: Money.of('1', 'BRL'),
-      referenceKey: null,
-    });
-    await expectSqlState(save(duplicate), UNIQUE_VIOLATION, 'wager_transactions_idempotency_key_uq');
-  });
-
-  test('moeda da transação precisa ser a da carteira', async () => {
-    const { wallet } = await walletWithProcessedBet();
-    const usd = WagerTransaction.receive({
-      idempotencyKey: 'usd-bet',
-      walletId: wallet.id,
-      type: 'BET',
-      amount: Money.of('1', 'USD'),
-      referenceKey: null,
-    });
-    await expectSqlState(save(usd), FOREIGN_KEY_VIOLATION, 'wager_transactions_wallet_currency_fk');
-  });
-
-  test('forma por tipo é validada no banco', async () => {
-    const { wallet } = await walletWithProcessedBet();
+  test('Idempotency-Key e (provider_id, external_transaction_id) são únicos', async () => {
+    const wallet = await openWallet();
+    await insertTransaction(wallet, { idempotency_key: 'k', external_transaction_id: 'e1' });
     await expectSqlState(
-      sql(
-        `insert into wager_transactions (id, idempotency_key, payload_hash, wallet_id, type, currency, amount, reference_key, status)
-         values (gen_random_uuid(), 'x', repeat('a', 64), ?, 'BET', 'BRL', 10, 'ref', 'PENDING')`,
-        [wallet.id],
-      ),
-      CHECK_VIOLATION,
-      'wager_transactions_shape_ck',
+      insertTransaction(wallet, { idempotency_key: 'k' }),
+      UNIQUE_VIOLATION,
+      'wager_transactions_idempotency_key_uq',
     );
+    await expectSqlState(
+      insertTransaction(wallet, { external_transaction_id: 'e1' }),
+      UNIQUE_VIOLATION,
+      'wager_transactions_provider_external_uq',
+    );
+    // Mesmo id externo em outro provedor é outra transação.
+    await insertTransaction(wallet, { external_transaction_id: 'e1', provider_id: 'provider-b' });
   });
 
-  test('REJECTED exige failure_code', async () => {
-    const { wallet } = await walletWithProcessedBet();
-    await expectSqlState(
-      sql(
-        `insert into wager_transactions (id, idempotency_key, payload_hash, wallet_id, type, currency, amount, status, processed_at)
-         values (gen_random_uuid(), 'x', repeat('a', 64), ?, 'BET', 'BRL', 10, 'REJECTED', now())`,
-        [wallet.id],
-      ),
-      CHECK_VIOLATION,
-      'wager_transactions_failure_code_ck',
-    );
+  test.each([
+    ['BET com referência', { reference_external_transaction_id: 'x' }, 'wager_transactions_shape_ck'],
+    ['BET de valor zero', { amount: '0' }, 'wager_transactions_shape_ck'],
+    ['REFUND sem referência', { kind: 'REFUND' }, 'wager_transactions_shape_ck'],
+    ['valor negativo', { kind: 'LOSS', amount: '-1' }, 'wager_transactions_amount_non_negative_ck'],
+    ['provedor interno fora da OPENING', { provider_id: 'internal' }, 'wager_transactions_internal_ck'],
+    ['sem rodada', { round_id: null }, 'wager_transactions_round_game_ck'],
+    ['REJECTED sem failure_code', { status: 'REJECTED', processed_at: new Date(), observed_balance: '1', observed_currency: 'BRL' }, 'wager_transactions_failure_code_ck'],
+    ['PROCESSED sem processed_at', { status: 'PROCESSED', observed_balance: '1', observed_currency: 'BRL' }, 'wager_transactions_processed_at_ck'],
+    ['PROCESSED sem saldo observado', { status: 'PROCESSED', processed_at: new Date() }, 'wager_transactions_observed_balance_ck'],
+    ['saldo observado sem moeda', { observed_balance: '1' }, 'wager_transactions_observed_currency_ck'],
+    ['PENDING_REFERENCE sem referência', { status: 'PENDING_REFERENCE', observed_balance: '1', observed_currency: 'BRL' }, 'wager_transactions_pending_reference_ck'],
+    ['kind desconhecido', { kind: 'JACKPOT' }, 'wager_transactions_kind_ck'],
+  ])('CHECK: %s', async (_, overrides, constraint) => {
+    const wallet = await openWallet();
+    await expectSqlState(insertTransaction(wallet, overrides), CHECK_VIOLATION, constraint);
+  });
+
+  test('transação com moeda diferente da carteira é gravada REJECTED (auditável)', async () => {
+    const wallet = await openWallet();
+    const usd = await wager(wallet, { money: { amount: '1', currency: 'USD' } });
+    expect(usd.status).toBe('REJECTED');
+    expect(usd.failureCode).toBe('CURRENCY_MISMATCH');
+    const [row] = await sql('select currency, observed_currency from wager_transactions where id = ?', [usd.id]);
+    expect(row).toEqual({ currency: 'USD', observed_currency: 'BRL' });
   });
 
   test('estado terminal não muda', async () => {
-    const { bet } = await walletWithProcessedBet();
+    const wallet = await openWallet();
+    const bet = await wager(wallet);
     await expectSqlState(
-      sql(`update wager_transactions set status = 'FAILED', failure_code = 'INTERNAL_ERROR' where id = ?`, [bet.id]),
+      sql(`update wager_transactions set status = 'FAILED', failure_code = 'PROCESSING_FAILED' where id = ?`, [bet.id]),
       RAISED_EXCEPTION,
       'estado terminal',
     );
   });
 
-  test('campos de negócio são imutáveis mesmo em estado aberto', async () => {
-    const { wallet } = await walletWithProcessedBet();
-    const pending = WagerTransaction.receive({
-      idempotencyKey: 'pending-bet',
-      walletId: wallet.id,
-      type: 'BET',
-      amount: Money.of('1', 'BRL'),
-      referenceKey: null,
-    });
-    await save(pending);
+  test('campos de negócio são imutáveis mesmo em estado aberto; PENDING_REFERENCE não volta a PENDING', async () => {
+    const wallet = await openWallet();
+    const refund = await wager(wallet, { kind: 'REFUND', referenceExternalTransactionId: 'nao-chegou' });
+    expect(refund.status).toBe('PENDING_REFERENCE');
+    await expectSqlState(sql('update wager_transactions set amount = 2 where id = ?', [refund.id]), RAISED_EXCEPTION, 'imutáveis');
     await expectSqlState(
-      sql('update wager_transactions set amount = 2 where id = ?', [pending.id]),
+      sql(`update wager_transactions set status = 'PENDING' where id = ?`, [refund.id]),
       RAISED_EXCEPTION,
-      'imutáveis',
+      'PENDING_REFERENCE',
     );
-    // Transição de estado em transação aberta continua permitida.
-    await sql(`update wager_transactions set status = 'PROCESSED', processed_at = now() where id = ?`, [pending.id]);
   });
 
   test('não permite DELETE nem TRUNCATE', async () => {
-    const { bet } = await walletWithProcessedBet();
+    const wallet = await openWallet();
+    const bet = await wager(wallet);
     await expectSqlState(sql('delete from wager_transactions where id = ?', [bet.id]), RAISED_EXCEPTION);
     await expectSqlState(sql('truncate wager_transactions cascade'), RAISED_EXCEPTION);
   });
 
-  test('uma BET só é liquidada uma vez', async () => {
-    const { wallet, bet } = await walletWithProcessedBet();
-    const settle = (key: string, type: 'WIN' | 'LOSS', amount: string) => {
-      const tx = WagerTransaction.receive({
-        idempotencyKey: key,
-        walletId: wallet.id,
-        type,
-        amount: Money.of(amount, 'BRL'),
-        referenceKey: bet.idempotencyKey,
-      });
-      expect(tx.linkReference(bet)).toBeNull();
-      tx.markProcessed();
-      return tx;
-    };
-
-    await save(settle('win-1', 'WIN', '50'));
-    await expectSqlState(save(settle('loss-1', 'LOSS', '0')), UNIQUE_VIOLATION, 'wager_transactions_one_settlement_per_bet_uq');
+  test('uma OPENING por carteira', async () => {
+    const wallet = await openWallet('100');
+    await expectSqlState(
+      insertTransaction(wallet, {
+        provider_id: 'internal',
+        kind: 'OPENING',
+        round_id: null,
+        game_id: null,
+        status: 'PROCESSED',
+        processed_at: new Date(),
+        observed_balance: '10',
+        observed_currency: 'BRL',
+      }),
+      UNIQUE_VIOLATION,
+      'wager_transactions_one_opening_uq',
+    );
   });
 
-  test('BET liquidada precisa ser da mesma carteira', async () => {
-    const { bet } = await walletWithProcessedBet();
-    const { wallet: other } = await walletWithProcessedBet();
+  test('uma referência é revertida no máximo uma vez', async () => {
+    const wallet = await openWallet();
+    const bet = await wager(wallet, { externalTransactionId: 'bet-1' });
+    const processedReversal = (kind: string) =>
+      insertTransaction(wallet, {
+        kind,
+        reference_external_transaction_id: 'bet-1',
+        reference_transaction_id: bet.id,
+        status: 'PROCESSED',
+        processed_at: new Date(),
+        observed_balance: '100',
+        observed_currency: 'BRL',
+      });
+    await processedReversal('REFUND');
+    await expectSqlState(processedReversal('ROLLBACK'), UNIQUE_VIOLATION, 'wager_transactions_one_reversal_uq');
+  });
+
+  test.each([
+    ['outra carteira', 'wallet'],
+    ['outro jogador', 'player'],
+    ['outra rodada', 'round'],
+  ])('referência precisa ser do mesmo provedor, jogador, carteira, moeda e rodada (%s)', async (_, field) => {
+    const wallet = await openWallet();
+    const other = await openWallet();
+    const bet = await wager(wallet, { externalTransactionId: 'bet-1' });
+    const target = field === 'wallet' ? other : wallet;
     await expectSqlState(
-      sql(
-        `insert into wager_transactions (id, idempotency_key, payload_hash, wallet_id, type, currency, amount,
-                                         reference_key, reference_transaction_id, status, processed_at)
-         values (gen_random_uuid(), 'cross', repeat('a', 64), ?, 'WIN', 'BRL', 10, ?, ?, 'PROCESSED', now())`,
-        [other.id, bet.idempotencyKey, bet.id],
-      ),
+      insertTransaction(target, {
+        kind: 'WIN',
+        ...(field === 'player' && { player_id: 'outro' }),
+        ...(field === 'round' && { round_id: 'round-2' }),
+        reference_external_transaction_id: 'bet-1',
+        reference_transaction_id: bet.id,
+        status: 'PROCESSED',
+        processed_at: new Date(),
+        observed_balance: '100',
+        observed_currency: 'BRL',
+      }),
       FOREIGN_KEY_VIOLATION,
       'wager_transactions_reference_fk',
+    );
+  });
+
+  test('PROCESSED com referência informada exige o vínculo', async () => {
+    const wallet = await openWallet();
+    await expectSqlState(
+      insertTransaction(wallet, {
+        kind: 'WIN',
+        reference_external_transaction_id: 'bet-1',
+        status: 'PROCESSED',
+        processed_at: new Date(),
+        observed_balance: '100',
+        observed_currency: 'BRL',
+      }),
+      CHECK_VIOLATION,
+      'wager_transactions_reference_linked_ck',
     );
   });
 });
 
 describe('wallet_ledger_entries', () => {
   test('é append-only: UPDATE, DELETE e TRUNCATE são bloqueados', async () => {
-    const { entry } = await walletWithProcessedBet();
-    await expectSqlState(sql('update wallet_ledger_entries set amount = 1 where id = ?', [entry.id]), RAISED_EXCEPTION, 'append-only');
-    await expectSqlState(sql('delete from wallet_ledger_entries where id = ?', [entry.id]), RAISED_EXCEPTION, 'append-only');
+    const wallet = await openWallet();
+    await wager(wallet);
+    await expectSqlState(sql('update wallet_ledger_entries set amount = 1'), RAISED_EXCEPTION, 'append-only');
+    await expectSqlState(sql('delete from wallet_ledger_entries'), RAISED_EXCEPTION, 'append-only');
     await expectSqlState(sql('truncate wallet_ledger_entries'), RAISED_EXCEPTION, 'append-only');
-
-    const [row] = await sql('select amount from wallet_ledger_entries where id = ?', [entry.id]);
-    expect(row).toEqual({ amount: '30.00' });
   });
 
-  test('um único lançamento por transação', async () => {
-    const { wallet, bet } = await walletWithProcessedBet();
+  test('um único lançamento por transação e por versão da carteira', async () => {
+    const wallet = await openWallet();
+    const bet = await wager(wallet);
+    await expectSqlState(insertEntry(wallet, bet.id), UNIQUE_VIOLATION, 'wallet_ledger_entries_transaction_uq');
+
+    const win = await wager(wallet, { kind: 'WIN' });
+    // Mesma versão de um lançamento existente: o sintoma de um lost update.
+    const another = await insertTransaction(wallet, {
+      kind: 'WIN',
+      status: 'PROCESSED',
+      processed_at: new Date(),
+      observed_balance: '1',
+      observed_currency: 'BRL',
+    });
     await expectSqlState(
-      sql(
-        `insert into wallet_ledger_entries (id, wallet_id, transaction_id, direction, currency, amount, balance_after)
-         values (gen_random_uuid(), ?, ?, 'DEBIT', 'BRL', 30, 40)`,
-        [wallet.id, bet.id],
-      ),
+      insertEntry(wallet, another, { direction: 'CREDIT', balance_before: '90', balance_after: '100', wallet_version: 3 }),
       UNIQUE_VIOLATION,
-      'wallet_ledger_entries_transaction_uq',
+      'wallet_ledger_entries_wallet_version_uq',
     );
+    expect(win.status).toBe('PROCESSED');
   });
 
-  test('lançamento precisa ser da mesma carteira da transação', async () => {
-    const { wallet } = await walletWithProcessedBet();
-    const { wallet: other } = await walletWithProcessedBet();
-    const pending = WagerTransaction.receive({
-      idempotencyKey: 'sem-lancamento',
-      walletId: wallet.id,
-      type: 'BET',
-      amount: Money.of('1', 'BRL'),
-      referenceKey: null,
-    });
-    await save(pending);
+  test('aritmética fechada e saldos não negativos', async () => {
+    const wallet = await openWallet();
+    const processed = () =>
+      insertTransaction(wallet, { status: 'PROCESSED', processed_at: new Date(), observed_balance: '1', observed_currency: 'BRL' });
+    await expectSqlState(insertEntry(wallet, await processed(), { balance_after: '91' }), CHECK_VIOLATION, 'wallet_ledger_entries_balanced_ck');
     await expectSqlState(
-      sql(
-        `insert into wallet_ledger_entries (id, wallet_id, transaction_id, direction, currency, amount, balance_after)
-         values (gen_random_uuid(), ?, ?, 'DEBIT', 'BRL', 1, 1)`,
-        [other.id, pending.id],
-      ),
-      FOREIGN_KEY_VIOLATION,
-      'wallet_ledger_entries_transaction_wallet_fk',
+      insertEntry(wallet, await processed(), { amount: '0', balance_after: '100' }),
+      CHECK_VIOLATION,
+      'wallet_ledger_entries_amount_positive_ck',
+    );
+    await expectSqlState(
+      insertEntry(wallet, await processed(), { balance_before: '5', balance_after: '-5' }),
+      CHECK_VIOLATION,
+      'wallet_ledger_entries_balances_non_negative_ck',
     );
   });
 
-  test('valor positivo e saldo resultante não negativo', async () => {
-    const { wallet } = await walletWithProcessedBet();
-    const pending = WagerTransaction.receive({
-      idempotencyKey: 'p',
-      walletId: wallet.id,
-      type: 'BET',
-      amount: Money.of('1', 'BRL'),
-      referenceKey: null,
+  test('lançamento só para transação PROCESSED que move saldo', async () => {
+    const wallet = await openWallet('1');
+    const rejected = await wager(wallet, { money: { amount: '50', currency: 'BRL' } });
+    expect(rejected.status).toBe('REJECTED');
+    await expectSqlState(insertEntry(wallet, rejected.id), RAISED_EXCEPTION, 'exige transação PROCESSED');
+
+    const loss = await wager(wallet, { kind: 'LOSS', money: { amount: '0', currency: 'BRL' } });
+    await expectSqlState(insertEntry(wallet, loss.id), RAISED_EXCEPTION, 'exige transação PROCESSED');
+  });
+
+  test('lançamento tem a carteira e a moeda da transação', async () => {
+    const wallet = await openWallet();
+    const other = await openWallet();
+    const id = await insertTransaction(wallet, {
+      status: 'PROCESSED',
+      processed_at: new Date(),
+      observed_balance: '1',
+      observed_currency: 'BRL',
     });
-    await save(pending);
-    const insert = (amount: string, balanceAfter: string) =>
-      sql(
-        `insert into wallet_ledger_entries (id, wallet_id, transaction_id, direction, currency, amount, balance_after)
-         values (gen_random_uuid(), ?, ?, 'DEBIT', 'BRL', ?::numeric, ?::numeric)`,
-        [wallet.id, pending.id, amount, balanceAfter],
-      );
-    await expectSqlState(insert('0', '10'), CHECK_VIOLATION, 'wallet_ledger_entries_amount_positive_ck');
-    await expectSqlState(insert('1', '-1'), CHECK_VIOLATION, 'wallet_ledger_entries_balance_after_non_negative_ck');
+    await expectSqlState(insertEntry(other, id), FOREIGN_KEY_VIOLATION, 'wallet_ledger_entries_transaction_fk');
   });
 });

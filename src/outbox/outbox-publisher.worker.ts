@@ -38,13 +38,14 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
 
   private async run(): Promise<void> {
     while (this.running) {
-      let published = 0;
+      let claimed = 0;
       try {
-        published = await this.publisher.publishBatch();
+        const result = await this.publisher.publishBatch();
+        claimed = result.published + result.failed;
       } catch (error) {
         this.logger.error(`Falha ao publicar outbox: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (published < OUTBOX_BATCH_SIZE) {
+      if (claimed < OUTBOX_BATCH_SIZE) {
         await new Promise((resolve) => setTimeout(resolve, this.config.outbox.pollIntervalMs));
       }
     }

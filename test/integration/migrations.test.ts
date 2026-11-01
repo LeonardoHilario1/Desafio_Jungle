@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import { Money } from '../../src/domain/money';
+import { Wallet } from '../../src/domain/wallet';
 import { migrations } from '../../src/migrations';
+import { MikroOrmWageringUnitOfWork } from '../../src/persistence/mikro-orm-wagering-store';
 import { initTestOrm, resetDatabase } from '../support/database';
 
 let orm: MikroORM;
@@ -30,7 +33,7 @@ async function executedNames(): Promise<string[]> {
 }
 
 const allNames = migrations.map((m) => m.name);
-const domainTables = ['outbox_events', 'wager_transactions', 'wallet_ledger_entries', 'wallets'];
+const domainTables = ['outbox_messages', 'wager_transactions', 'wallet_ledger_entries', 'wallets'];
 
 beforeAll(async () => {
   orm = await initTestOrm();
@@ -63,22 +66,14 @@ describe('migrations', () => {
     expect(await tables()).toEqual(domainTables);
   });
 
-  test('down do schema é recusado quando o ledger tem lançamentos', async () => {
-    const conn = orm.em.getConnection();
-    await conn.execute(`insert into wallets (id, player_id, currency, balance) values
-                        ('00000000-0000-0000-0000-000000000001', 'p', 'BRL', 0)`);
-    await conn.execute(`insert into wager_transactions
-                          (id, idempotency_key, payload_hash, wallet_id, type, currency, amount, status)
-                        values ('00000000-0000-0000-0000-000000000002', 'k', repeat('a', 64),
-                                '00000000-0000-0000-0000-000000000001', 'BET', 'BRL', 10, 'PENDING')`);
-    await conn.execute(`insert into wallet_ledger_entries
-                          (id, wallet_id, transaction_id, direction, currency, amount, balance_after)
-                        values ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001',
-                                '00000000-0000-0000-0000-000000000002', 'CREDIT', 'BRL', 10, 10)`);
+  test('down é recusado quando há dados financeiros', async () => {
+    const opened = Wallet.open({ playerId: 'p', initialBalance: Money.from({ amount: '10', currency: 'BRL' }) });
+    await new MikroOrmWageringUnitOfWork(orm).run((store) => store.insertWallet(opened, []));
 
-    // allOrNothing: a falha no down do schema desfaz também o down das migrations posteriores.
+    // allOrNothing: a falha em um down desfaz também o down das migrations posteriores.
     await expect(orm.migrator.down({ to: 0 })).rejects.toThrow('down recusado');
     expect(await executedNames()).toEqual(allNames);
     expect(await tables()).toEqual(domainTables);
   });
+
 });
