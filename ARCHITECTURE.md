@@ -291,6 +291,39 @@ Um trigger impede alterar id, tipo, agregado, payload e `created_at`, desfazer
 `OUTBOX_PUBLISHER_ENABLED` (padrão `true`) e `OUTBOX_POLL_INTERVAL_MS` (padrão 500).
 Lote cheio publica o próximo imediatamente.
 
+## Etapa 6: testes de concorrência
+
+`test/integration/concurrency.test.ts` sobe **duas instâncias da aplicação**, cada uma
+com o seu pool de conexões, sobre o mesmo PostgreSQL, e divide as requisições entre
+elas (restrição 8).
+
+| Cenário | Resultado exigido |
+| --- | --- |
+| Saldo 100, duas BET de 80 em paralelo, uma por instância (10 rodadas) | exatamente uma PROCESSED (201) e uma REJECTED `INSUFFICIENT_FUNDS` (422); saldo 20.00; um único débito |
+| A mesma BET 50 vezes em paralelo | 50 respostas 201 com o mesmo id, 1 original e 49 replays; um único débito; uma única linha de transação |
+| A mesma WIN 50 vezes em paralelo | um único crédito |
+| WIN e LOSS da mesma BET em paralelo | uma liquida, a outra REJECTED `BET_ALREADY_SETTLED` |
+| Carga mista embaralhada em 5 carteiras (BET, WIN/LOSS às vezes antes da BET, replays pela outra instância) | todas as invariantes |
+
+**Invariantes** (`test/support/invariants.ts`), conferidas direto no banco ao fim de
+cada cenário:
+
+- saldo da carteira = créditos − débitos do ledger;
+- `version` = 1 + número de lançamentos;
+- BET/WIN processada tem exatamente um lançamento do valor e na direção certa;
+- LOSS, REJECTED e PENDING_REFERENCE não têm lançamento;
+- toda transação tem exatamente um evento no outbox.
+
+Um teste confirma que a verificação detecta uma divergência real.
+
+**Os testes pegam a falta do lock.** Removendo o `FOR UPDATE` do serviço, 12 dos 15
+testes falham (as duas BET de 80 debitam as duas, por lost update). O cenário das 50
+BETs iguais continua passando sem o lock, porque o `UNIQUE (idempotency_key)` segura
+sozinho: as camadas são independentes.
+
+**Execução repetida:** `bun run test:concurrency` roda o arquivo 20 vezes
+(`--rerun-each=20`, 300 testes, cerca de 70 s).
+
 ## Limitações conhecidas (até aqui)
 
 - Eventos que falham indefinidamente continuam sendo tentados a cada 300 s. Não há

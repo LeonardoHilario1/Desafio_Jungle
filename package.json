@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:unit": "bun test test/unit",
-    "test:integration": "bun test test/integration"
+    "test:integration": "bun test test/integration",
+    "test:concurrency": "bun test test/integration/concurrency.test.ts --rerun-each=20"
   },
   "devDependencies": {
     "@mikro-orm/cli": "7.2.6",

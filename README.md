@@ -4,9 +4,9 @@ Serviço que processa transações de apostas, atualiza o saldo de carteiras e m
 ledger imutável, continuando correto com entrega at-least-once. As decisões de desenho
 estão em [ARCHITECTURE.md](ARCHITECTURE.md) e o escopo em [SPEC.md](SPEC.md).
 
-> Status: **Etapas 1 a 5** concluídas: infraestrutura, domínio, schema com constraints,
-> API de carteiras e apostas (BET, WIN, LOSS) com idempotência e lock por carteira, e
-> outbox transacional publicado no SQS.
+> Status: **Etapas 1 a 6** concluídas: infraestrutura, domínio, schema com constraints,
+> API de carteiras e apostas (BET, WIN, LOSS) com idempotência e lock por carteira,
+> outbox transacional publicado no SQS e testes de concorrência com duas instâncias.
 
 Para ver os eventos publicados na stack do Compose:
 
@@ -77,6 +77,7 @@ bun run start
 | `bun test`               | testes unitários e de integração                 |
 | `bun run test:unit`      | só os unitários (não precisam de Docker)         |
 | `bun run test:integration` | só os de integração                            |
+| `bun run test:concurrency` | testes de concorrência repetidos 20 vezes      |
 | `bun run migration:up`   | aplica as migrations pendentes                   |
 | `bun run migration:down` | reverte a última migration                       |
 
