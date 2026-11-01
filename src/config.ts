@@ -14,10 +14,17 @@ export interface SqsConfig {
   outboxQueueName: string;
 }
 
+export interface OutboxConfig {
+  /** Liga o loop de publicação nesta instância. Todas podem rodar ao mesmo tempo. */
+  publisherEnabled: boolean;
+  pollIntervalMs: number;
+}
+
 export interface AppConfig {
   port: number;
   db: DatabaseConfig;
   sqs: SqsConfig;
+  outbox: OutboxConfig;
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
@@ -37,6 +44,25 @@ function port(env: Env, name: string): number {
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 0 || value > 65535) {
     throw new Error(`Variável de ambiente ${name} não é uma porta válida: ${raw}`);
+  }
+  return value;
+}
+
+function optionalBoolean(env: Env, name: string, fallback: boolean): boolean {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  if (raw !== 'true' && raw !== 'false') {
+    throw new Error(`Variável de ambiente ${name} deve ser true ou false: ${raw}`);
+  }
+  return raw === 'true';
+}
+
+function optionalPositiveInt(env: Env, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Variável de ambiente ${name} deve ser inteiro positivo: ${raw}`);
   }
   return value;
 }
@@ -61,6 +87,10 @@ export function loadConfig(env: Env = process.env): AppConfig {
       accessKeyId: required(env, 'AWS_ACCESS_KEY_ID'),
       secretAccessKey: required(env, 'AWS_SECRET_ACCESS_KEY'),
       outboxQueueName: required(env, 'SQS_OUTBOX_QUEUE_NAME'),
+    },
+    outbox: {
+      publisherEnabled: optionalBoolean(env, 'OUTBOX_PUBLISHER_ENABLED', true),
+      pollIntervalMs: optionalPositiveInt(env, 'OUTBOX_POLL_INTERVAL_MS', 500),
     },
   };
 }

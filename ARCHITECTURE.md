@@ -238,7 +238,64 @@ campos desconhecidos. As regras de valor ficam no domínio. `amount` precisa ser
 `AuthGuard` sem efeito, aplicado aos controllers de carteira e de apostas como ponto de
 extensão (desenho na Etapa 7).
 
+## Etapa 5: outbox
+
+### Gravação
+
+Toda transação de aposta gravada gera um evento em `outbox_events` **no mesmo commit**
+da transação, do saldo e do ledger (`WageringService`). Ou tudo é gravado, ou nada. Os
+tipos de evento são:
+
+- `wager.transaction.processed`
+- `wager.transaction.rejected`
+- `wager.transaction.pending_reference`
+
+Replay, conflito de chave e erros não persistidos não geram evento.
+`UNIQUE (aggregate_id, event_type)` impede evento duplicado para a mesma transação.
+
+O payload leva valores monetários como string, o saldo da carteira depois da operação
+e `walletVersion`, que permite ao consumidor ordenar eventos da mesma carteira (a fila
+padrão do SQS não garante ordem).
+
+### Publicação (`OutboxPublisher`)
+
+1. Em uma transação: `SELECT ... WHERE published_at IS NULL AND next_attempt_at <= now()
+   ORDER BY created_at LIMIT 10 FOR UPDATE SKIP LOCKED`.
+2. `SendMessageBatch` (até 10 mensagens), com os atributos `eventId` e `eventType`.
+3. Sucesso preenche `published_at`. Falha incrementa `attempts`, grava `last_error` e
+   agenda `next_attempt_at` com backoff exponencial (2^n s, máximo 300 s).
+4. Commit.
+
+**Nada é publicado antes do commit (restrição 4):** o publisher só enxerga linhas já
+commitadas. Isso é coberto por teste.
+
+**Vários publishers:** todas as instâncias rodam o loop (`OutboxPublisherWorker`), e o
+`SKIP LOCKED` divide as linhas sem que uma espere a outra. Um teste com 4 publishers em
+paralelo confere que cada um dos 25 eventos foi enviado exatamente uma vez.
+
+**At-least-once:** se o processo cair entre o envio ao SQS e o commit que marca
+`published_at`, o evento é reenviado. O consumidor deve deduplicar por `eventId`. O
+consumidor com inbox ficou fora do MVP.
+
+**Trade-off:** as linhas ficam travadas durante a chamada ao SQS. É aceitável porque o
+lote é pequeno, o `SKIP LOCKED` faz os outros publishers pularem essas linhas e
+nenhuma transação financeira toca o outbox depois de inserir.
+
+### Imutabilidade
+
+Um trigger impede alterar id, tipo, agregado, payload e `created_at`, desfazer
+`published_at` e excluir linhas. Só as colunas de controle da publicação mudam.
+
+### Configuração
+
+`OUTBOX_PUBLISHER_ENABLED` (padrão `true`) e `OUTBOX_POLL_INTERVAL_MS` (padrão 500).
+Lote cheio publica o próximo imediatamente.
+
 ## Limitações conhecidas (até aqui)
+
+- Eventos que falham indefinidamente continuam sendo tentados a cada 300 s. Não há
+  dead-letter nem alerta por número de tentativas (métricas fora do escopo).
+- Não há limpeza de eventos publicados; a tabela cresce.
 
 - Transações em PENDING_REFERENCE não são reprocessadas quando a BET chega depois.
   Replay da mesma chave devolve o PENDING_REFERENCE gravado.

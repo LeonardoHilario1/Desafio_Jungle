@@ -20,5 +20,7 @@ export function testConfig(): AppConfig {
       secretAccessKey: 'test',
       outboxQueueName: 'wagering-events',
     },
+    // Os testes chamam o publisher diretamente, sem o loop em segundo plano.
+    outbox: { publisherEnabled: false, pollIntervalMs: 50 },
   };
 }

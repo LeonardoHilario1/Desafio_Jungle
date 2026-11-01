@@ -2,6 +2,7 @@ import { EntitySchema, type EntityCtor } from '@mikro-orm/core';
 import { WagerTransaction } from '../domain/wager-transaction';
 import { Wallet } from '../domain/wallet';
 import { WalletLedgerEntry } from '../domain/wallet-ledger-entry';
+import { OutboxEvent, type OutboxEventType, type OutboxPayload } from '../outbox/outbox-event';
 import type { FailureCode } from '../domain/domain-error';
 import type { LedgerDirection, LedgerEntryKind } from '../domain/wallet-ledger-entry';
 import type { TransactionStatus, WagerType } from '../domain/wager-transaction';
@@ -115,4 +116,26 @@ export const WalletLedgerEntrySchema = new EntitySchema<WalletLedgerEntryRow>({
   },
 });
 
-export const entitySchemas = [WalletSchema, WagerTransactionSchema, WalletLedgerEntrySchema];
+interface OutboxEventRow {
+  id: string;
+  eventType: OutboxEventType;
+  aggregateId: string;
+  payload: OutboxPayload;
+  createdAt: Date;
+}
+
+// Só os campos de criação. O controle de publicação (published_at, attempts,
+// next_attempt_at, last_error) é gerido pelo publisher com SQL direto.
+export const OutboxEventSchema = new EntitySchema<OutboxEventRow>({
+  class: OutboxEvent as unknown as EntityCtor<OutboxEventRow>,
+  tableName: 'outbox_events',
+  properties: {
+    id: { type: 'uuid', columnType: 'uuid', primary: true },
+    eventType: { type: 'string', columnType: 'varchar(64)', fieldName: 'event_type' },
+    aggregateId: { type: 'uuid', columnType: 'uuid', fieldName: 'aggregate_id' },
+    payload: { type: 'json', columnType: 'jsonb' },
+    createdAt: { ...timestamptz, fieldName: 'created_at' },
+  },
+});
+
+export const entitySchemas = [WalletSchema, WagerTransactionSchema, WalletLedgerEntrySchema, OutboxEventSchema];

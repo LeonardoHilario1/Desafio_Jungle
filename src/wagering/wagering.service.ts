@@ -8,6 +8,7 @@ import { Wallet } from '../domain/wallet';
 import type { WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import { isLockTimeout, isUniqueViolation } from '../persistence/db-errors';
 import { WagerTransactionSchema } from '../persistence/entity-schemas';
+import { OutboxEvent } from '../outbox/outbox-event';
 
 // Tempo máximo esperando o lock de uma carteira antes de responder 503.
 const LOCK_TIMEOUT = '5s';
@@ -93,11 +94,13 @@ export class WageringService {
     const entry =
       candidate.type === 'BET' ? applyBet(wallet, candidate) : await this.applySettlement(em, wallet, candidate);
 
-    // Ordem das FKs: a carteira já existe; transação antes do lançamento.
+    // Ordem das FKs: a carteira já existe; transação antes do lançamento e do evento.
+    // O evento entra no mesmo commit: ou tudo é gravado, ou nada (outbox transacional).
     await em.persist(candidate).flush();
     if (entry) {
-      await em.persist(entry).flush();
+      em.persist(entry);
     }
+    await em.persist(OutboxEvent.forTransaction(candidate, wallet)).flush();
     return { transaction: candidate, replayed: false };
   }
 

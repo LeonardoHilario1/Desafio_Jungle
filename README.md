@@ -4,9 +4,17 @@ Serviço que processa transações de apostas, atualiza o saldo de carteiras e m
 ledger imutável, continuando correto com entrega at-least-once. As decisões de desenho
 estão em [ARCHITECTURE.md](ARCHITECTURE.md) e o escopo em [SPEC.md](SPEC.md).
 
-> Status: **Etapas 1 a 4** concluídas: infraestrutura, domínio, schema com constraints e
-> API de carteiras e apostas (BET, WIN, LOSS) com idempotência e lock por carteira.
-> Outbox/SQS ainda não foi implementado.
+> Status: **Etapas 1 a 5** concluídas: infraestrutura, domínio, schema com constraints,
+> API de carteiras e apostas (BET, WIN, LOSS) com idempotência e lock por carteira, e
+> outbox transacional publicado no SQS.
+
+Para ver os eventos publicados na stack do Compose:
+
+```bash
+docker compose exec localstack awslocal sqs receive-message \
+  --queue-url http://localhost:4566/000000000000/wagering-events \
+  --message-attribute-names All --max-number-of-messages 10
+```
 
 ## Stack
 

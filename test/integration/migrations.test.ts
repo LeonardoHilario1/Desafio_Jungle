@@ -30,7 +30,7 @@ async function executedNames(): Promise<string[]> {
 }
 
 const allNames = migrations.map((m) => m.name);
-const domainTables = ['wager_transactions', 'wallet_ledger_entries', 'wallets'];
+const domainTables = ['outbox_events', 'wager_transactions', 'wallet_ledger_entries', 'wallets'];
 
 beforeAll(async () => {
   orm = await initTestOrm();
