@@ -1,15 +1,15 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Outbox transacional. A linha nasce no mesmo commit da mudança financeira; o publisher
- * a envia ao SQS e marca published_at. Vários publishers disputam linhas com
+ * outbox transacional. a linha nasce no mesmo commit da mudança financeira; o publisher
+ * manda pro SQS e marca published_at. vários publishers disputam as linhas com
  * FOR UPDATE SKIP LOCKED.
  *
- * O id é o eventId, determinístico por (transação, tipo de evento): a PK impede gravar
- * o mesmo fato duas vezes. O payload é o envelope do IntegrationEvent.
+ * o id é o eventId, determinístico por (transação, tipo de evento): a PK não deixa gravar
+ * o mesmo fato duas vezes. o payload é o envelope do IntegrationEvent.
  *
- * Imutabilidade: id, tipo, agregado, payload e occurred_at nunca mudam; published_at,
- * uma vez preenchido, não volta; linhas não são excluídas.
+ * imutabilidade: id, tipo, agregado, payload e occurred_at nunca mudam; published_at,
+ * depois de preenchido, não volta; nenhuma linha é apagada.
  */
 export class Migration20261102020000_outbox extends Migration {
   override up(): void {

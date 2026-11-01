@@ -4,7 +4,7 @@ import type { Wallet } from '../carteira';
 import type { LedgerDirection, WalletLedgerEntry } from '../lancamento-ledger';
 import { deterministicEventId, IntegrationEvent, type EventContext } from './evento-integracao';
 
-/** Campos comuns aos eventos de transação. */
+/** campos que todo evento de transação tem */
 export interface WagerTransactionEventData {
   transactionId: string;
   providerId: string;
@@ -50,7 +50,7 @@ export interface WagerTransactionProcessedData extends WagerTransactionEventData
   walletVersion: number;
 }
 
-/** Qualquer transação aplicada, inclusive LOSS e OPENING. */
+/** qualquer transação aplicada, inclusive LOSS e OPENING */
 export class WagerTransactionProcessed extends IntegrationEvent<WagerTransactionProcessedData> {
   readonly eventType = 'WagerTransactionProcessed';
   readonly version = 1;
@@ -72,7 +72,7 @@ export interface WagerTransactionRejectedData extends WagerTransactionEventData 
   balance: MoneyProps;
 }
 
-/** Transação rejeitada por regra de negócio. */
+/** transação rejeitada por regra de negócio */
 export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionRejectedData> {
   readonly eventType = 'WagerTransactionRejected';
   readonly version = 1;
@@ -89,7 +89,7 @@ export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionR
   }
 }
 
-/** Referência ausente: a transação aguarda e será reprocessada. */
+/** referência ainda não chegou: a transação fica esperando e vai ser reprocessada */
 export class WagerTransactionPendingReference extends IntegrationEvent<WagerTransactionEventData> {
   readonly eventType = 'WagerTransactionPendingReference';
   readonly version = 1;
@@ -111,7 +111,7 @@ export interface WalletBalanceChangedData {
   walletVersion: number;
 }
 
-/** Somente quando o saldo muda. aggregateId é a carteira. */
+/** só quando o saldo muda. aqui o aggregateId é a carteira */
 export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedData> {
   readonly eventType = 'WalletBalanceChanged';
   readonly version = 1;
@@ -131,7 +131,7 @@ export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedD
   }
 }
 
-/** Eventos que o resultado de uma transação gera, na ordem em que vão para a outbox. */
+/** eventos que o resultado de uma transação gera, na ordem em que entram na outbox */
 export function eventsFor(
   tx: WagerTransaction,
   wallet: Wallet,

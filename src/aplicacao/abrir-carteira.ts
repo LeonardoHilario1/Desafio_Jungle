@@ -12,10 +12,10 @@ export interface OpenWalletCommand {
 }
 
 /**
- * Abre a carteira. Saldo inicial maior que zero grava, na mesma transação SQL, a
- * transação OPENING, o lançamento CREDIT e os eventos. A unicidade (player_id, currency)
- * é do banco: duas criações simultâneas resultam em uma carteira e um conflito que
- * informa o id da existente.
+ * abre a carteira. se tiver saldo inicial, grava junto (mesma transação SQL) a OPENING,
+ * o lançamento CREDIT e os eventos. quem garante uma carteira por (player_id, currency)
+ * é o banco: se duas chegarem ao mesmo tempo, uma cria e a outra recebe conflito com o
+ * id da que já existe.
  */
 @Injectable()
 export class OpenWallet {

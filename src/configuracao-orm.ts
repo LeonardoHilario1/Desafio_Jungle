@@ -18,7 +18,7 @@ export function ormOptions(db: DatabaseConfig) {
       migrationsList: migrations,
       transactional: true,
       allOrNothing: true,
-      // Migrations são escritas à mão em SQL; o snapshot do gerador não é usado.
+      // as migrations eu escrevo na mão em SQL, então não uso o snapshot do gerador
       snapshot: false,
       snapshotOnMigrate: false,
     },

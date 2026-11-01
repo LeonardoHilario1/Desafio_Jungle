@@ -7,11 +7,11 @@ import type {
   WagerTransactionStatus,
 } from '../dominio/transacao-aposta';
 
-/** Resposta do POST /wagering/transactions. */
+/** resposta do POST /wagering/transactions */
 export interface SubmitView {
   transactionId: string;
   status: WagerTransactionStatus;
-  /** Saldo observado quando a transação chegou ao estado atual (o mesmo em todo replay). */
+  /** saldo que a transação viu quando chegou no estado atual (o replay devolve o mesmo) */
   balance: MoneyProps | null;
   idempotentReplay: boolean;
   failureCode?: TransactionFailureCode;
@@ -27,7 +27,7 @@ export function presentSubmit({ transaction: tx, idempotentReplay }: WagerResult
   };
 }
 
-/** Transação completa, para as consultas. */
+/** transação completa, pras consultas */
 export interface TransactionView {
   id: string;
   providerId: string;
@@ -73,12 +73,12 @@ export function presentTransaction(tx: WagerTransaction): TransactionView {
 }
 
 /**
- * Status HTTP derivado só do estado gravado, para que o replay devolva a mesma resposta.
+ * o status HTTP sai só do estado gravado, assim o replay devolve exatamente a mesma resposta.
  * - PROCESSED: 201, aplicada.
- * - PENDING_REFERENCE: 202, aceita, aguardando a referência; será reprocessada.
+ * - PENDING_REFERENCE: 202, aceitei mas tô esperando a referência; vai ser reprocessada.
  * - REJECTED: 422, gravada mas recusada por regra de negócio (failureCode no corpo).
- * - FAILED: 500, falha permanente de infraestrutura registrada (só pela fila).
- * - PENDING: nunca é commitada; 500 por segurança.
+ * - FAILED: 500, falha permanente de infra registrada (só acontece pela fila).
+ * - PENDING: nunca é commitada; deixei 500 por segurança.
  */
 export function httpStatusFor(tx: WagerTransaction): number {
   switch (tx.status) {

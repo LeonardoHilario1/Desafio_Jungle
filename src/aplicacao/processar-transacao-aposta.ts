@@ -13,7 +13,7 @@ import {
   type WageringUnitOfWork,
 } from './repositorio-apostas';
 
-/** Comando de entrada, igual para HTTP e fila. */
+/** comando de entrada, o mesmo pra HTTP e pra fila */
 export interface WagerTransactionCommand {
   idempotencyKey: string;
   providerId: string;
@@ -29,31 +29,31 @@ export interface WagerTransactionCommand {
 
 export interface WagerResult {
   transaction: WagerTransaction;
-  /** true quando a Idempotency-Key já tinha sido gravada e o resultado gravado foi devolvido. */
+  /** true quando a Idempotency-Key já existia e eu só devolvi o que estava gravado */
   idempotentReplay: boolean;
 }
 
 /**
- * Caso de uso de submissão de transação, compartilhado pela API e pelo consumidor SQS.
- * Tudo acontece numa transação SQL:
+ * caso de uso que processa uma transação de aposta. a API usa e o consumidor SQS vai usar.
+ * tudo roda numa transação SQL só:
  *
- * 1. SELECT ... FOR UPDATE na carteira. Operações da mesma carteira são serializadas
- *    aqui, em qualquer instância; carteiras diferentes não disputam lock.
- * 2. Com o lock, procura a Idempotency-Key. Em READ COMMITTED cada comando enxerga o
- *    que já foi commitado, então a requisição concorrente com a mesma chave que pegou o
- *    lock antes já está visível: vira replay (mesmo payloadHash) ou conflito.
- * 3. Resolve a referência por (providerId, referenceExternalTransactionId), aplica as
- *    regras (applyWager) e grava transação, saldo, lançamento e eventos no mesmo commit.
+ * 1. SELECT ... FOR UPDATE na carteira. é aqui que eu serializo as operações da mesma
+ *    carteira, em qualquer instância; carteiras diferentes não brigam por lock.
+ * 2. já com o lock, procuro a Idempotency-Key. como é READ COMMITTED, se outra requisição
+ *    com a mesma chave pegou o lock antes, o commit dela já aparece pra mim: vira replay
+ *    (mesmo payloadHash) ou conflito.
+ * 3. resolvo a referência por (providerId, referenceExternalTransactionId), passo pelas
+ *    regras (applyWager) e gravo transação, saldo, lançamento e eventos no mesmo commit.
  *
- * A mesma chave em paralelo para carteiras diferentes não é serializada pelo lock; o
- * UNIQUE do banco barra o segundo insert e o resultado é decidido relendo o vencedor.
+ * obs: a mesma chave em paralelo pra carteiras diferentes o lock não pega. aí quem segura
+ * é o UNIQUE do banco, e eu decido a resposta relendo quem ganhou.
  */
 @Injectable()
 export class ProcessWagerTransaction {
   constructor(@Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork) {}
 
   async execute(command: WagerTransactionCommand, ctx: EventContext): Promise<WagerResult> {
-    // Valida a forma e calcula o payloadHash antes de abrir transação.
+    // valido a forma e calculo o payloadHash antes de abrir transação
     const candidate = WagerTransaction.create({ ...command, money: Money.from(command.money), correlationId: ctx.correlationId });
 
     try {
@@ -82,8 +82,8 @@ export class ProcessWagerTransaction {
       candidate.referenceExternalTransactionId === null
         ? null
         : await store.findByExternalId(candidate.providerId, candidate.referenceExternalTransactionId);
-    // A referência só é confiável sob lock se for da mesma carteira; applyWager rejeita
-    // as de outra carteira antes de usar o estado dela.
+    // a referência só é confiável sob o lock se for da mesma carteira. se for de outra,
+    // applyWager rejeita antes de olhar o estado dela
     const referenceAlreadyReversed =
       reference !== null && candidate.isReversal() && (await store.hasProcessedReversal(reference.id));
 
@@ -100,8 +100,8 @@ export class ProcessWagerTransaction {
 }
 
 /**
- * Replay ou conflito diante de uma transação já gravada com a mesma Idempotency-Key ou
- * o mesmo (providerId, externalTransactionId).
+ * replay ou conflito quando já tem transação gravada com a mesma Idempotency-Key ou
+ * com o mesmo (providerId, externalTransactionId).
  */
 async function resolveDuplicate(
   store: WageringStore,

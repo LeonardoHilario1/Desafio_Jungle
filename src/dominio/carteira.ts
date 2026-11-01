@@ -15,17 +15,17 @@ export interface WalletState {
   updatedAt: Date;
 }
 
-/** Carteira recém-aberta e, se houve saldo inicial, a transação OPENING e o seu lançamento. */
+/** carteira que acabou de abrir e, se teve saldo inicial, a OPENING e o lançamento dela */
 export interface OpenedWallet {
   wallet: Wallet;
   opening: { transaction: WagerTransaction; entry: WalletLedgerEntry } | null;
 }
 
 /**
- * Aggregate root: carteira de um jogador em uma moeda. O saldo só muda por debit/credit,
- * que incrementam version e devolvem o lançamento de ledger correspondente, de modo que
- * saldo e ledger nunca divergem. A exclusão mútua entre instâncias é do banco
- * (SELECT ... FOR UPDATE), não desta classe.
+ * aggregate root: a carteira de um jogador numa moeda. o saldo só muda por debit/credit,
+ * que sobem a version e devolvem o lançamento do ledger, então saldo e ledger não têm
+ * como divergir. a exclusão mútua entre instâncias não é aqui, é do banco
+ * (SELECT ... FOR UPDATE).
  */
 export class Wallet {
   private constructor(
@@ -39,9 +39,9 @@ export class Wallet {
   ) {}
 
   /**
-   * Abre a carteira com version 1. Saldo inicial maior que zero gera uma transação
-   * interna OPENING, já PROCESSED, e um lançamento CREDIT de 0 até o saldo inicial; os
-   * três devem ser gravados na mesma transação SQL.
+   * abre com version 1. se o saldo inicial for maior que zero, gera a transação interna
+   * OPENING (já PROCESSED) e um lançamento CREDIT de 0 até o saldo inicial. os três
+   * precisam ser gravados na mesma transação SQL.
    */
   static open(props: { id?: string; playerId: string; initialBalance: Money; at?: Date }): OpenedWallet {
     const playerId = typeof props.playerId === 'string' ? props.playerId.trim() : '';
@@ -78,7 +78,7 @@ export class Wallet {
     return { wallet, opening: { transaction, entry } };
   }
 
-  /** Reconstrução a partir da persistência: não revalida. */
+  /** reconstrói a partir do banco, sem revalidar nada */
   static rehydrate(state: WalletState): Wallet {
     return new Wallet(
       state.id,
@@ -108,7 +108,7 @@ export class Wallet {
     return !this._balance.isLessThan(money);
   }
 
-  /** Lança INSUFFICIENT_FUNDS se o saldo não cobrir; quem decide a rejeição consulta canDebit antes. */
+  /** lança INSUFFICIENT_FUNDS se não tiver saldo; quem decide rejeitar chama canDebit antes */
   debit(money: Money, transactionId: string, at: Date = new Date()): WalletLedgerEntry {
     if (!this.canDebit(money)) {
       throw new DomainError('INSUFFICIENT_FUNDS', `Saldo ${this._balance} insuficiente para debitar ${money}`);
@@ -123,7 +123,7 @@ export class Wallet {
 
   private apply(direction: LedgerDirection, money: Money, transactionId: string, at: Date): WalletLedgerEntry {
     const balanceAfter = direction === 'CREDIT' ? this._balance.add(money) : this._balance.subtract(money);
-    // Cria o lançamento antes de alterar o estado: se a validação falhar, a carteira fica intacta.
+    // crio o lançamento antes de mexer no estado: se a validação falhar, a carteira fica como estava
     const entry = WalletLedgerEntry.create({
       walletId: this.id,
       transactionId,

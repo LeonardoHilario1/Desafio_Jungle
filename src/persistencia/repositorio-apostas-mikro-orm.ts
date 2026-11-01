@@ -23,10 +23,10 @@ import {
   writeWallet,
 } from './mapeadores';
 
-// Tempo máximo esperando o lock de uma carteira antes de desistir (WALLET_BUSY).
+// quanto tempo espero o lock de uma carteira antes de desistir (WALLET_BUSY)
 const LOCK_TIMEOUT = '5s';
 
-/** Implementação da porta com MikroORM: uma transação SQL por run, isolamento READ COMMITTED. */
+/** implementação da porta com MikroORM: uma transação SQL por run, em READ COMMITTED */
 export class MikroOrmWageringUnitOfWork implements WageringUnitOfWork {
   constructor(private readonly orm: MikroORM) {}
 
@@ -59,11 +59,11 @@ function translate(error: unknown): unknown {
 }
 
 /**
- * Store sobre um EntityManager. Guarda os records carregados para que o save escreva no
- * record gerenciado (UPDATE pelo Unit of Work) em vez de criar outro.
+ * store em cima de um EntityManager. guardo os records que carreguei pra que o save escreva
+ * no record gerenciado (UPDATE pelo Unit of Work) em vez de criar outro.
  *
- * As FKs não estão declaradas como relações no MikroORM, então a ordem dos INSERTs é
- * imposta com flushes em sequência: carteira, transação, depois lançamento e outbox.
+ * como as FKs não estão declaradas como relações no MikroORM, eu forço a ordem dos INSERTs
+ * com flushes em sequência: carteira, transação, depois lançamento e outbox.
  */
 class MikroOrmWageringStore implements WageringStore {
   private readonly wallets = new Map<string, WalletRecord>();

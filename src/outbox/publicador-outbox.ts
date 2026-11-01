@@ -5,7 +5,7 @@ import type { OutboxMessage } from '../dominio/mensagem-outbox';
 import { OutboxMessageRecord } from '../persistencia/esquemas-entidades';
 import { outboxFromRecord, writeOutboxMessage } from '../persistencia/mapeadores';
 
-// Limite do SendMessageBatch do SQS.
+// limite do SendMessageBatch do SQS
 export const OUTBOX_BATCH_SIZE = 10;
 const MAX_ERROR_LENGTH = 1000;
 
@@ -15,17 +15,15 @@ export interface PublishResult {
 }
 
 /**
- * Publica mensagens da outbox no SQS.
+ * publica as mensagens da outbox no SQS.
  *
- * - Só lê linhas commitadas, então nada é publicado antes do commit da transação
- *   financeira.
+ * - só lê linha commitada, então nada sai antes do commit da transação financeira.
  * - FOR UPDATE SKIP LOCKED (LockMode.PESSIMISTIC_PARTIAL_WRITE): vários publishers, em
- *   qualquer instância, publicam em paralelo sem pegar a mesma linha e sem esperar.
- * - At-least-once: se o processo cair depois do envio e antes do commit que marca
- *   published_at, a mensagem é reenviada por quem pegar a linha depois. O consumidor
- *   deduplica pelo eventId (atributo da mensagem e campo do envelope), que é
- *   determinístico por fato.
- * - Falha de envio agenda nova tentativa com backoff (OutboxMessage.scheduleRetry).
+ *   qualquer instância, publicam em paralelo sem pegar a mesma linha e sem ficar esperando.
+ * - at-least-once: se o processo cair depois de enviar e antes do commit que marca
+ *   published_at, quem pegar a linha depois reenvia. o consumidor deduplica pelo eventId
+ *   (atributo da mensagem e campo do envelope), que é sempre o mesmo pro mesmo fato.
+ * - se o envio falhar, agendo nova tentativa com backoff (OutboxMessage.scheduleRetry).
  */
 export class OutboxPublisher {
   private queueUrl: string | undefined;
@@ -36,7 +34,7 @@ export class OutboxPublisher {
     private readonly queueName: string,
   ) {}
 
-  /** Publica um lote de mensagens vencidas. */
+  /** publica um lote de mensagens que já venceram */
   async publishBatch(now: Date = new Date()): Promise<PublishResult> {
     return this.orm.em.fork().transactional(async (em) => {
       const records = await em.find(
@@ -63,7 +61,7 @@ export class OutboxPublisher {
     });
   }
 
-  /** Envia o lote e devolve as falhas por id da mensagem. */
+  /** envia o lote e devolve as falhas por id da mensagem */
   private async send(messages: OutboxMessage[]): Promise<Map<string, string>> {
     const failures = new Map<string, string>();
     try {
@@ -83,7 +81,7 @@ export class OutboxPublisher {
       for (const failed of result.Failed ?? []) {
         if (failed.Id) failures.set(failed.Id, `${failed.Code}: ${failed.Message ?? ''}`);
       }
-      // Entrada sem confirmação nem falha explícita é tratada como falha.
+      // se não veio nem sucesso nem falha explícita, trato como falha
       const succeeded = new Set((result.Successful ?? []).map((s) => s.Id));
       for (const m of messages) {
         if (!succeeded.has(m.id) && !failures.has(m.id)) failures.set(m.id, 'sem confirmação do SQS');

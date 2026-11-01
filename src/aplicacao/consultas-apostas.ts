@@ -4,7 +4,7 @@ import type { Wallet } from '../dominio/carteira';
 import { ApplicationError } from './erro-aplicacao';
 import { WAGERING_UNIT_OF_WORK, type WageringUnitOfWork } from './repositorio-apostas';
 
-/** Consultas de leitura, sem lock. */
+/** só leitura, sem lock */
 @Injectable()
 export class WageringQueries {
   constructor(@Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork) {}

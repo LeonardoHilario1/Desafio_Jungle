@@ -3,9 +3,9 @@ import type { MoneyProps } from '../dominio/dinheiro';
 import type { EventContext } from '../dominio/eventos/evento-integracao';
 import { ApiError } from './erro-api';
 
-// Validação manual da forma do corpo. As regras de valor (formato do amount, moeda,
-// tamanho dos campos) ficam no domínio; aqui só se garante tipo e campos conhecidos.
-// Campos desconhecidos são rejeitados para que um erro de digitação não passe calado.
+// validação da forma do corpo feita na mão. aqui eu só checo tipo e campos conhecidos;
+// regra de valor (formato do amount, moeda, tamanho) fica no domínio.
+// campo desconhecido eu rejeito de propósito, pra erro de digitação não passar batido
 
 type Body = Record<string, unknown>;
 
@@ -44,7 +44,7 @@ export function optionalString(body: Body, field: string): string | null {
   return value;
 }
 
-/** { amount, currency }, ambos string. amount numérico é rejeitado: dinheiro não passa por number. */
+/** { amount, currency }, os dois string. amount numérico eu recuso: dinheiro não passa por number */
 export function requiredMoney(body: Body, field: string): MoneyProps {
   const value = body[field];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -65,7 +65,7 @@ export function requireUuid(value: string, field: string): string {
   return value.toLowerCase();
 }
 
-/** X-Correlation-Id recebido (se bem formado) ou um novo; propagado para logs e eventos. */
+/** uso o X-Correlation-Id que veio (se estiver bem formado), senão gero um. vai pros logs e eventos */
 export function eventContext(correlationHeader: string | undefined, causationId?: string): EventContext {
   const correlationId =
     correlationHeader !== undefined && CORRELATION_ID_PATTERN.test(correlationHeader) ? correlationHeader : randomUUID();

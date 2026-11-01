@@ -7,9 +7,9 @@ export type ApplicationErrorCode =
   | 'WALLET_BUSY';
 
 /**
- * Erro dos casos de uso, independente do transporte. A borda traduz: o ErrorFilter
- * para status HTTP, o consumidor SQS para ack, retry ou DLQ.
- * transient indica que repetir a mesma operação pode dar certo.
+ * erro dos casos de uso, sem saber de onde veio a chamada. quem traduz é a borda:
+ * o ErrorFilter vira status HTTP, o consumidor SQS decide entre ack, retry ou DLQ.
+ * transient = vale a pena tentar de novo com a mesma operação.
  */
 export class ApplicationError extends Error {
   constructor(

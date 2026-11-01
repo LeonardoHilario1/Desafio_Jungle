@@ -2,10 +2,10 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { loadDatabaseConfig } from './configuracao';
 import { ormOptions } from './configuracao-orm';
 
-// Uso: bun src/migrar.ts up | down
-// "down" reverte apenas a última migration executada.
-// Roda como passo separado (serviço "migrate" no Compose), nunca na subida da
-// aplicação, para que várias instâncias não migrem ao mesmo tempo.
+// uso: bun src/migrar.ts up | down
+// o down desfaz só a última migration executada.
+// roda como passo separado (serviço "migrate" no Compose), nunca na subida da aplicação,
+// pra várias instâncias não tentarem migrar ao mesmo tempo
 const direction = process.argv[2];
 if (direction !== 'up' && direction !== 'down') {
   console.error('Uso: bun src/migrar.ts up|down');

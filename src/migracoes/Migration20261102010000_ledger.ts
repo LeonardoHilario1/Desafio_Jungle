@@ -1,14 +1,14 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Ledger append-only. Cada lançamento:
- * - pertence a uma transação PROCESSED que move saldo (trigger de inserção) e é o único
+ * ledger append-only. cada lançamento:
+ * - pertence a uma transação PROCESSED que mexe no saldo (trigger no insert) e é o único
  *   dela (UNIQUE transaction_id);
  * - tem a moeda da carteira e da transação (FKs compostas);
  * - fecha a conta: balance_before ± amount = balance_after, sem saldo negativo (CHECK);
- * - é o único da sua versão da carteira (UNIQUE wallet_id, wallet_version), que também
- *   serve de índice para a paginação do ledger.
- * UPDATE, DELETE e TRUNCATE são bloqueados por trigger.
+ * - é o único daquela versão da carteira (UNIQUE wallet_id, wallet_version), que também
+ *   serve de índice pra paginar o ledger.
+ * UPDATE, DELETE e TRUNCATE são barrados por trigger.
  */
 export class Migration20261102010000_ledger extends Migration {
   override up(): void {
@@ -24,10 +24,10 @@ export class Migration20261102010000_ledger extends Migration {
         balance_after   numeric(18,2)  not null,
         wallet_version  integer        not null,
         created_at      timestamptz    not null default now(),
-        -- Uma transação gera no máximo um lançamento: replay nunca debita duas vezes.
+        -- uma transação gera no máximo um lançamento: replay nunca debita duas vezes
         constraint wallet_ledger_entries_transaction_uq unique (transaction_id),
-        -- Um lançamento por versão da carteira: duas escritas que partissem do mesmo saldo
-        -- (lost update) colidiriam aqui. Também dá a ordem total do ledger da carteira.
+        -- um lançamento por versão da carteira: duas escritas partindo do mesmo saldo
+        -- (lost update) batem aqui. de quebra dá a ordem total do ledger da carteira
         constraint wallet_ledger_entries_wallet_version_uq unique (wallet_id, wallet_version),
         constraint wallet_ledger_entries_wallet_currency_fk
           foreign key (wallet_id, currency) references wallets (id, currency),
@@ -63,7 +63,7 @@ export class Migration20261102010000_ledger extends Migration {
         for each statement execute function wallet_ledger_entries_append_only();
     `);
 
-    // Lançamento só para transação PROCESSED que move saldo (LOSS e REJECTED não geram).
+    // lançamento só pra transação PROCESSED que mexe no saldo (LOSS e REJECTED não geram)
     this.addSql(`
       create function wallet_ledger_entries_require_processed() returns trigger
       language plpgsql as $$

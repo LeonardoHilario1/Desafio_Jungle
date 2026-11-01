@@ -15,7 +15,7 @@ export interface SqsConfig {
 }
 
 export interface OutboxConfig {
-  /** Liga o loop de publicação nesta instância. Todas podem rodar ao mesmo tempo. */
+  /** liga o loop de publicação nesta instância. pode ligar em todas ao mesmo tempo */
   publisherEnabled: boolean;
   pollIntervalMs: number;
 }

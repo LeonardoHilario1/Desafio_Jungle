@@ -1,16 +1,16 @@
 import { EntitySchema } from '@mikro-orm/core';
 
 /*
- * Records de persistência: classes simples, uma por tabela, que o MikroORM gerencia
- * (Unit of Work, Identity Map, LockMode). O domínio não depende delas nem do ORM; a
+ * records de persistência: classes simples, uma por tabela, que o MikroORM gerencia
+ * (Unit of Work, Identity Map, LockMode). o domínio não depende delas nem do ORM; a
  * conversão fica em mapeadores.ts.
  *
- * O tipo de cada coluna é declarado explicitamente (type + columnType), sem inferência
- * por design:type. As tabelas e constraints vêm das migrations SQL; este arquivo precisa
- * refletir esse schema.
+ * declaro o tipo de cada coluna explicitamente (type + columnType), nada de inferir por
+ * design:type. tabelas e constraints vêm das migrations SQL, então este arquivo tem que
+ * bater com esse schema.
  *
- * Valores numeric(18,2) são lidos e gravados como string: o driver pg devolve numeric
- * como string, e os mappers convertem para Money. Nenhum valor monetário passa por number.
+ * numeric(18,2) é lido e gravado como string: o driver pg já devolve numeric como string
+ * e os mappers convertem pra Money. nenhum valor de dinheiro passa por number.
  */
 
 const decimal = { type: 'string', columnType: 'numeric(18,2)' } as const;
@@ -132,11 +132,11 @@ export class OutboxMessageRecord {
   attempts!: number;
   nextAttemptAt!: Date | null;
   publishedAt!: Date | null;
-  /** Diagnóstico do publisher; não faz parte do domínio. */
+  /** diagnóstico do publisher; não faz parte do domínio */
   lastError: string | null = null;
 }
 
-// created_at fica só no banco (default now()).
+// created_at fica só no banco (default now())
 export const OutboxMessageSchema = new EntitySchema<OutboxMessageRecord>({
   class: OutboxMessageRecord,
   tableName: 'outbox_messages',

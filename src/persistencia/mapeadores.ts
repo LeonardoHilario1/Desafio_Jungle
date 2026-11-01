@@ -12,12 +12,12 @@ import {
 } from './esquemas-entidades';
 
 /*
- * Conversão entre records (persistência) e domínio. A leitura usa as factories
- * rehydrate, que não revalidam transições. A escrita copia o estado do domínio para o
- * record gerenciado, e o Unit of Work do MikroORM gera o INSERT/UPDATE no flush.
+ * conversão entre records (persistência) e domínio. pra ler uso as factories rehydrate,
+ * que não revalidam transição. pra gravar copio o estado do domínio pro record gerenciado
+ * e o Unit of Work do MikroORM gera o INSERT/UPDATE no flush.
  *
- * Money ocupa duas colunas (valor numeric e moeda char(3)) e é reidratado com
- * Money.from, que aceita exatamente a representação devolvida pelo PostgreSQL.
+ * Money ocupa duas colunas (valor numeric e moeda char(3)) e volta com Money.from, que
+ * aceita exatamente o formato que o PostgreSQL devolve.
  */
 
 const money = (amount: string, currency: string): Money => Money.from({ amount, currency });
@@ -91,7 +91,7 @@ export function writeTransaction(
   r.correlationId = t.correlationId;
   r.status = t.status;
   r.failureCode = t.failureCode;
-  // O saldo observado é da carteira, cuja moeda pode divergir da transação (CURRENCY_MISMATCH).
+  // o saldo observado é da carteira, e a moeda dela pode ser diferente da transação (CURRENCY_MISMATCH)
   r.observedBalance = t.observedBalance?.amount ?? null;
   r.observedCurrency = t.observedBalance?.currency ?? null;
   r.createdAt = t.createdAt;

@@ -4,8 +4,8 @@ import { Migration20261102000000_carteiras_e_transacoes } from './Migration20261
 import { Migration20261102010000_ledger } from './Migration20261102010000_ledger';
 import { Migration20261102020000_outbox } from './Migration20261102020000_outbox';
 
-// Lista explícita em vez de descoberta por glob: funciona igual no Bun, no container
-// e nos testes, e a ordem de execução fica visível no código.
+// preferi listar na mão em vez de descobrir por glob: funciona igual no Bun, no container
+// e nos testes, e a ordem fica visível no código
 export const migrations: MigrationObject[] = [
   { name: 'Migration20261031000000_base', class: Migration20261031000000_base },
   { name: 'Migration20261102000000_carteiras_e_transacoes', class: Migration20261102000000_carteiras_e_transacoes },

@@ -14,10 +14,9 @@ export interface OutboxMessageState {
 }
 
 /**
- * Evento de integração aguardando publicação. Nasce na mesma transação SQL da mudança
- * financeira; o publisher o envia ao SQS depois do commit. Não há limite de tentativas:
- * um evento confirmado não pode ser perdido, então ele é reenviado com backoff até
- * ser aceito.
+ * evento esperando pra ser publicado. nasce na mesma transação SQL da mudança financeira
+ * e o publisher manda pro SQS depois do commit. não coloquei limite de tentativas: evento
+ * confirmado não pode se perder, então fica reenviando com backoff até ser aceito.
  */
 export class OutboxMessage {
   private constructor(
@@ -83,7 +82,7 @@ export class OutboxMessage {
     this._nextAttemptAt = null;
   }
 
-  /** Incrementa attempts e agenda a próxima tentativa: 2^attempts segundos, até 300 s. */
+  /** soma uma tentativa e agenda a próxima: 2^attempts segundos, no máximo 300 s */
   scheduleRetry(now: Date): void {
     this._attempts += 1;
     const seconds = Math.min(2 ** this._attempts, MAX_BACKOFF_SECONDS);

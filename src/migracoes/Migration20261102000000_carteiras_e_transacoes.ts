@@ -1,15 +1,15 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Carteiras e transações. As garantias que não podem depender só do código ficam aqui:
+ * carteiras e transações. o que não pode depender só do código eu coloquei aqui:
  * - unicidade: carteira por (player_id, currency); Idempotency-Key; transação por
  *   (provider_id, external_transaction_id); uma OPENING por carteira; uma reversão
  *   processada por referência;
- * - não negatividade: CHECK (balance >= 0), valores >= 0 e forma de cada kind;
+ * - não negatividade: CHECK (balance >= 0), valores >= 0 e a forma de cada kind;
  * - referência: FK composta garante que a transação referenciada é do mesmo provedor,
  *   jogador, carteira, moeda e rodada;
- * - imutabilidade: campos de negócio nunca mudam, estados terminais são definitivos e
- *   nada é excluído (trigger).
+ * - imutabilidade: campo de negócio não muda, estado terminal é definitivo e nada é
+ *   apagado (trigger).
  */
 export class Migration20261102000000_carteiras_e_transacoes extends Migration {
   override up(): void {
@@ -23,7 +23,7 @@ export class Migration20261102000000_carteiras_e_transacoes extends Migration {
         created_at  timestamptz    not null default now(),
         updated_at  timestamptz    not null default now(),
         constraint wallets_player_currency_uq unique (player_id, currency),
-        -- Alvo da FK composta do ledger (wallet_id, currency).
+        -- alvo da FK composta do ledger (wallet_id, currency)
         constraint wallets_id_currency_uq unique (id, currency),
         constraint wallets_player_id_not_blank_ck check (btrim(player_id) <> ''),
         constraint wallets_currency_ck check (currency ~ '^[A-Z]{3}$'),
@@ -52,19 +52,19 @@ export class Migration20261102000000_carteiras_e_transacoes extends Migration {
         status                             varchar(32)    not null,
         failure_code                       varchar(64),
         observed_balance                   numeric(18,2),
-        -- Moeda do saldo observado: a da carteira, que difere da transação em CURRENCY_MISMATCH.
+        -- moeda do saldo observado: é a da carteira, que pode diferir da transação no CURRENCY_MISMATCH
         observed_currency                  char(3),
         created_at                         timestamptz    not null default now(),
         processed_at                       timestamptz,
 
         constraint wager_transactions_idempotency_key_uq unique (idempotency_key),
         constraint wager_transactions_provider_external_uq unique (provider_id, external_transaction_id),
-        -- Alvos de FKs compostas: ledger (id, wallet_id, currency) e referência.
+        -- alvos das FKs compostas: ledger (id, wallet_id, currency) e referência
         constraint wager_transactions_id_wallet_currency_uq unique (id, wallet_id, currency),
         constraint wager_transactions_reference_target_uq
           unique (id, provider_id, player_id, wallet_id, currency, round_id),
-        -- A moeda pode divergir da carteira: a transação é gravada REJECTED com
-        -- CURRENCY_MISMATCH, para ficar auditável. O ledger é que exige a moeda da carteira.
+        -- a moeda pode ser diferente da carteira: aí a transação é gravada REJECTED com
+        -- CURRENCY_MISMATCH, pra ficar auditável. quem exige a moeda da carteira é o ledger
         constraint wager_transactions_wallet_fk foreign key (wallet_id) references wallets (id),
         constraint wager_transactions_reference_fk
           foreign key (reference_transaction_id, provider_id, player_id, wallet_id, currency, round_id)
@@ -85,7 +85,7 @@ export class Migration20261102000000_carteiras_e_transacoes extends Migration {
           or (kind = 'LOSS'     and amount >= 0)
           or (kind in ('REFUND', 'ROLLBACK') and reference_external_transaction_id is not null and amount > 0)
         ),
-        -- O provedor 'internal' é reservado à OPENING, que não tem rodada nem jogo.
+        -- o provedor 'internal' é só da OPENING, que não tem rodada nem jogo
         constraint wager_transactions_internal_ck check ((provider_id = 'internal') = (kind = 'OPENING')),
         constraint wager_transactions_round_game_ck
           check (kind = 'OPENING' or (round_id is not null and game_id is not null)),
@@ -99,7 +99,7 @@ export class Migration20261102000000_carteiras_e_transacoes extends Migration {
           check ((observed_balance is null) = (observed_currency is null)),
         constraint wager_transactions_pending_reference_ck
           check (status <> 'PENDING_REFERENCE' or reference_external_transaction_id is not null),
-        -- Processada com referência informada ⇔ vinculada a ela; só processadas têm vínculo.
+        -- processada com referência ⇔ vinculada a ela; só processada tem vínculo
         constraint wager_transactions_reference_linked_ck check (
           case when status = 'PROCESSED'
                then (reference_external_transaction_id is null) = (reference_transaction_id is null)
@@ -110,14 +110,14 @@ export class Migration20261102000000_carteiras_e_transacoes extends Migration {
     `);
 
     this.addSql(`create index wager_transactions_wallet_idx on wager_transactions (wallet_id, created_at);`);
-    // Uma transação OPENING por carteira.
+    // uma OPENING por carteira
     this.addSql(`create unique index wager_transactions_one_opening_uq
                    on wager_transactions (wallet_id) where kind = 'OPENING';`);
-    // Uma referência é revertida (REFUND ou ROLLBACK) no máximo uma vez.
+    // uma referência é revertida (REFUND ou ROLLBACK) no máximo uma vez
     this.addSql(`create unique index wager_transactions_one_reversal_uq
                    on wager_transactions (reference_transaction_id)
                    where status = 'PROCESSED' and kind in ('REFUND', 'ROLLBACK');`);
-    // Dependentes aguardando uma referência, para reprocessamento.
+    // dependentes esperando uma referência, pro reprocessamento
     this.addSql(`create index wager_transactions_pending_reference_idx
                    on wager_transactions (provider_id, reference_external_transaction_id)
                    where status = 'PENDING_REFERENCE';`);
@@ -165,7 +165,7 @@ export class Migration20261102000000_carteiras_e_transacoes extends Migration {
   }
 
   override down(): void {
-    // Reverter apaga dados financeiros: só com as tabelas vazias.
+    // reverter apaga dado financeiro, então só deixo com as tabelas vazias
     this.addSql(`
       do $$
       begin

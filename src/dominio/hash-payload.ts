@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 type CanonicalValue = string | null | CanonicalValue[] | { [key: string]: CanonicalValue };
 
-/** JSON com chaves de objeto ordenadas e sem espaços, para que o hash não dependa da ordem. */
+/** JSON com as chaves ordenadas e sem espaço, pro hash não depender da ordem dos campos */
 export function canonicalJson(value: CanonicalValue): string {
   if (value === null || typeof value === 'string') {
     return JSON.stringify(value);

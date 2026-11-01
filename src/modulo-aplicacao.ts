@@ -18,8 +18,8 @@ import { MikroOrmWageringUnitOfWork } from './persistencia/repositorio-apostas-m
 import { WageringController } from './apostas/controlador-apostas';
 import { WalletsController } from './carteiras/controlador-carteiras';
 
-// Módulo dinâmico: a configuração entra por parâmetro, e os testes montam a
-// aplicação apontando para o banco de testes sem mexer em process.env.
+// módulo dinâmico: a configuração entra por parâmetro, assim nos testes eu monto a
+// aplicação apontando pro banco de testes sem mexer no process.env
 @Module({})
 export class AppModule {
   static register(config: AppConfig): DynamicModule {
@@ -41,7 +41,7 @@ export class AppModule {
               },
             }),
         },
-        // Porta de persistência dos casos de uso, implementada com MikroORM.
+        // porta de persistência dos casos de uso, implementada com MikroORM
         {
           provide: WAGERING_UNIT_OF_WORK,
           useFactory: (orm: MikroORM) => new MikroOrmWageringUnitOfWork(orm),

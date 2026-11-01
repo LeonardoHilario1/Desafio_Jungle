@@ -9,9 +9,9 @@ import { APP_CONFIG, type AppConfig } from '../configuracao';
 import { OUTBOX_BATCH_SIZE, OutboxPublisher } from './publicador-outbox';
 
 /**
- * Loop de publicação dentro do processo da aplicação. Cada instância roda o seu; o
- * SKIP LOCKED do publisher divide o trabalho entre elas. Lote cheio publica o próximo
- * em seguida; lote parcial ou vazio espera pollIntervalMs.
+ * loop de publicação rodando dentro do processo da aplicação. cada instância roda o seu e o
+ * SKIP LOCKED do publisher divide o trabalho. se o lote veio cheio, já publica o próximo;
+ * se veio parcial ou vazio, espera pollIntervalMs.
  */
 @Injectable()
 export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeApplicationShutdown {
@@ -30,7 +30,7 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
     this.loop = this.run();
   }
 
-  // Antes do shutdown dos módulos, para o ORM não fechar com um lote em andamento.
+  // roda antes do shutdown dos módulos, pro ORM não fechar com lote no meio
   async beforeApplicationShutdown(): Promise<void> {
     this.running = false;
     await this.loop;

@@ -5,7 +5,7 @@ import { ReadinessService, type ReadinessReport } from './verificacao-prontidao'
 export class HealthController {
   constructor(@Inject(ReadinessService) private readonly readiness: ReadinessService) {}
 
-  // Liveness não consulta dependências: se o banco cair, reiniciar o processo não resolve.
+  // liveness não olha dependência: se o banco cair, reiniciar o processo não resolve nada
   @Get('live')
   @HttpCode(200)
   live(): { status: 'ok' } {

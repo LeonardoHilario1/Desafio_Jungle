@@ -12,7 +12,7 @@ export interface LedgerEntryState {
   money: Money;
   balanceBefore: Money;
   balanceAfter: Money;
-  /** version da carteira depois deste lançamento; ordena o ledger de cada carteira. */
+  /** version da carteira depois deste lançamento; é o que ordena o ledger de cada carteira */
   walletVersion: number;
   createdAt: Date;
 }
@@ -20,8 +20,8 @@ export interface LedgerEntryState {
 export type CreateLedgerEntryProps = Omit<LedgerEntryState, 'id' | 'createdAt'> & { id?: string; createdAt?: Date };
 
 /**
- * Lançamento imutável do ledger: sem campos mutáveis nem métodos de transição. No banco,
- * UPDATE, DELETE e TRUNCATE são bloqueados por trigger, e um CHECK repete a aritmética
+ * lançamento do ledger, imutável: não tem campo mutável nem método de transição. no banco
+ * UPDATE, DELETE e TRUNCATE são barrados por trigger, e um CHECK confere de novo a conta
  * balance_before ± amount = balance_after.
  */
 export class WalletLedgerEntry {
@@ -39,7 +39,7 @@ export class WalletLedgerEntry {
     Object.freeze(this);
   }
 
-  /** Valida o lançamento: valor positivo, saldos não negativos, mesma moeda e aritmética fechada. */
+  /** valida o lançamento: valor positivo, saldos não negativos, mesma moeda e conta fechando */
   static create(props: CreateLedgerEntryProps): WalletLedgerEntry {
     const entry = WalletLedgerEntry.rehydrate({
       ...props,
@@ -58,14 +58,14 @@ export class WalletLedgerEntry {
     if (entry.balanceBefore.isNegative() || entry.balanceAfter.isNegative()) {
       throw new DomainError('INVALID_LEDGER_ENTRY', 'Lançamento não pode deixar saldo negativo');
     }
-    // add/subtract lançam CURRENCY_MISMATCH se as moedas divergirem.
+    // se as moedas forem diferentes, add/subtract já lançam CURRENCY_MISMATCH
     if (!entry.isBalanced()) {
       throw new DomainError('INVALID_LEDGER_ENTRY', 'balanceBefore ± money deve ser igual a balanceAfter');
     }
     return entry;
   }
 
-  /** Reconstrução a partir da persistência: não revalida. */
+  /** reconstrói a partir do banco, sem revalidar */
   static rehydrate(state: LedgerEntryState): WalletLedgerEntry {
     return new WalletLedgerEntry(
       state.id,
@@ -80,7 +80,7 @@ export class WalletLedgerEntry {
     );
   }
 
-  /** balanceBefore ± money === balanceAfter. */
+  /** balanceBefore ± money === balanceAfter */
   isBalanced(): boolean {
     const expected =
       this.direction === 'CREDIT' ? this.balanceBefore.add(this.money) : this.balanceBefore.subtract(this.money);

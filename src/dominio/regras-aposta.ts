@@ -3,11 +3,11 @@ import type { WagerTransaction, WagerTransactionKind } from './transacao-aposta'
 import type { Wallet } from './carteira';
 import type { WalletLedgerEntry } from './lancamento-ledger';
 
-/** O que o caso de uso leu do banco, com o lock da carteira na mão, para decidir. */
+/** o que o caso de uso leu do banco (já com o lock da carteira) pra eu poder decidir */
 export interface ReferenceContext {
-  /** Transação resolvida por (providerId, referenceExternalTransactionId); null se não existe. */
+  /** transação achada por (providerId, referenceExternalTransactionId); null se não existe */
   reference: WagerTransaction | null;
-  /** Já existe reversão PROCESSED da referência. */
+  /** true se a referência já tem uma reversão PROCESSED */
   referenceAlreadyReversed: boolean;
 }
 
@@ -16,7 +16,7 @@ export type WagerOutcome =
   | { status: 'REJECTED'; failureCode: FailureCode }
   | { status: 'PENDING_REFERENCE' };
 
-// Tipos de referência aceitos por kind.
+// que tipo de referência cada kind aceita
 const ALLOWED_REFERENCES: Partial<Record<WagerTransactionKind, readonly WagerTransactionKind[]>> = {
   WIN: ['BET'],
   LOSS: ['BET'],
@@ -25,17 +25,17 @@ const ALLOWED_REFERENCES: Partial<Record<WagerTransactionKind, readonly WagerTra
 };
 
 /**
- * Aplica uma transação aberta (PENDING ou PENDING_REFERENCE) à carteira: decide entre
- * processar, rejeitar ou aguardar a referência, e executa a transição. Puro: não faz
- * I/O; quem chama garante que a carteira está travada e grava o resultado.
+ * aplica uma transação aberta (PENDING ou PENDING_REFERENCE) na carteira: decide se
+ * processa, rejeita ou espera a referência, e já faz a transição. é pura, sem I/O; quem
+ * chama garante que a carteira está travada e grava o resultado.
  *
- * Ordem das verificações:
+ * a ordem das checagens:
  * 1. moeda e jogador da operação contra a carteira;
- * 2. referência: ausente ou ainda aberta → aguarda; caso contrário precisa estar
+ * 2. referência: se não chegou ou ainda está aberta, espera; se chegou, tem que estar
  *    PROCESSED, ser do mesmo jogador, carteira, moeda e rodada, e de um tipo permitido;
- * 3. reversões: mesmo valor da referência e nenhuma reversão anterior da mesma referência;
- * 4. efeito no saldo: débito sem saldo é rejeitado (INSUFFICIENT_FUNDS para BET,
- *    REVERSAL_INSUFFICIENT_FUNDS para ROLLBACK).
+ * 3. reversões: mesmo valor da referência e nenhuma reversão anterior dela;
+ * 4. efeito no saldo: débito sem saldo é rejeitado (INSUFFICIENT_FUNDS na BET,
+ *    REVERSAL_INSUFFICIENT_FUNDS no ROLLBACK).
  */
 export function applyWager(
   wallet: Wallet,
@@ -61,7 +61,7 @@ export function applyWager(
   const reference = ctx.reference;
   if (tx.referenceExternalTransactionId !== null) {
     if (reference === null || !reference.isTerminal()) {
-      // Entrega fora de ordem: a referência ainda não chegou ou ainda não terminou.
+      // chegou fora de ordem: a referência ainda não veio ou ainda não terminou
       if (tx.status === 'PENDING') tx.markPendingReference(wallet.balance);
       return { status: 'PENDING_REFERENCE' };
     }

@@ -11,7 +11,7 @@ import type { LedgerDirection } from './lancamento-ledger';
 export const WAGER_KINDS = ['OPENING', 'BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'] as const;
 export type WagerTransactionKind = (typeof WAGER_KINDS)[number];
 
-/** Tipos aceitos pela API e pela fila. OPENING é interno. */
+/** tipos que a API e a fila aceitam. OPENING é só interno */
 export const SUBMITTABLE_KINDS = ['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'] as const;
 export type SubmittableKind = (typeof SUBMITTABLE_KINDS)[number];
 
@@ -23,7 +23,7 @@ export type TransactionFailureCode = FailureCode | PermanentFailureCode;
 const TERMINAL_STATUSES: readonly WagerTransactionStatus[] = ['PROCESSED', 'REJECTED', 'FAILED'];
 const MAX_TEXT_LENGTH = 255;
 
-/** Provedor e prefixo usados nas transações internas OPENING. */
+/** provedor reservado pras transações internas OPENING */
 export const INTERNAL_PROVIDER_ID = 'internal';
 
 export interface WagerTransactionState {
@@ -38,7 +38,7 @@ export interface WagerTransactionState {
   gameId: string | null;
   kind: WagerTransactionKind;
   money: Money;
-  /** id no provedor da transação referenciada, não o id interno. */
+  /** id da transação referenciada no provedor, não o nosso id interno */
   referenceExternalTransactionId: string | null;
   correlationId: string;
   createdAt: Date;
@@ -46,7 +46,7 @@ export interface WagerTransactionState {
   referenceTransactionId: string | null;
   failureCode: TransactionFailureCode | null;
   processedAt: Date | null;
-  /** Saldo da carteira observado quando a transação chegou ao estado atual. */
+  /** saldo da carteira que a transação viu quando chegou no estado atual */
   observedBalance: Money | null;
 }
 
@@ -64,23 +64,23 @@ export interface CreateWagerTransactionProps {
   correlationId?: string;
 }
 
-/** Campos de negócio que entram no payloadHash. */
+/** campos de negócio que entram no payloadHash */
 export type PayloadFields = Omit<CreateWagerTransactionProps, 'idempotencyKey' | 'correlationId'>;
 
 /**
- * Transação recebida de um provedor (ou OPENING, interna).
+ * transação que chega do provedor (ou a OPENING, interna).
  *
- * Forma (validada em create):
+ * forma (validada no create):
  * - BET: valor > 0, sem referência.
  * - WIN: valor > 0, referência opcional (a BET da rodada).
- * - LOSS: valor >= 0, referência opcional; não move saldo.
+ * - LOSS: valor >= 0, referência opcional; não mexe no saldo.
  * - REFUND e ROLLBACK: valor > 0, referência obrigatória.
  *
- * Transições:
+ * transições:
  *   PENDING           → PROCESSED | REJECTED | FAILED | PENDING_REFERENCE
  *   PENDING_REFERENCE → PROCESSED | REJECTED | FAILED
- * PROCESSED, REJECTED e FAILED são terminais; transicionar a partir deles lança
- * InvalidTransactionStateError (erro de programação).
+ * PROCESSED, REJECTED e FAILED são terminais; tentar sair deles lança
+ * InvalidTransactionStateError, porque aí é bug.
  */
 export class WagerTransaction {
   private constructor(
@@ -105,7 +105,7 @@ export class WagerTransaction {
     private _observedBalance: Money | null,
   ) {}
 
-  /** Nasce em PENDING. Valida a forma e a exigência de referência por kind. */
+  /** nasce em PENDING. valida a forma e se a referência é exigida pro kind */
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     if (!SUBMITTABLE_KINDS.includes(props.kind)) {
       throw new DomainError('INVALID_TRANSACTION', `kind inválido: ${JSON.stringify(props.kind)}`);
@@ -149,7 +149,7 @@ export class WagerTransaction {
     );
   }
 
-  /** Transação interna de abertura de carteira, já PROCESSED. Usada só por Wallet.open. */
+  /** transação interna de abertura, já PROCESSED. só o Wallet.open usa */
   static opening(props: { walletId: string; playerId: string; money: Money; at: Date }): WagerTransaction {
     if (!props.money.isPositive()) {
       throw new DomainError('INVALID_TRANSACTION', 'OPENING deve ter valor maior que zero');
@@ -178,7 +178,7 @@ export class WagerTransaction {
     );
   }
 
-  /** Reconstrução a partir da persistência: não revalida forma nem transições. */
+  /** reconstrói a partir do banco, sem revalidar forma nem transição */
   static rehydrate(state: WagerTransactionState): WagerTransaction {
     return new WagerTransaction(
       state.id,
@@ -204,9 +204,9 @@ export class WagerTransaction {
   }
 
   /**
-   * SHA-256 do JSON canônico (chaves ordenadas, sem espaços) dos campos de negócio.
-   * Ficam de fora a Idempotency-Key, o correlationId e metadados de transporte. O valor
-   * entra normalizado, então "10" e "10.00" geram o mesmo hash.
+   * SHA-256 do JSON canônico (chaves ordenadas, sem espaço) dos campos de negócio.
+   * deixo de fora a Idempotency-Key, o correlationId e coisa de transporte. o valor entra
+   * normalizado, então "10" e "10.00" dão o mesmo hash.
    */
   static hashPayload(fields: PayloadFields): string {
     return sha256Hex({
@@ -244,7 +244,7 @@ export class WagerTransaction {
 
   // ---- transições
 
-  /** referenceTransactionId é obrigatório quando a transação informa referência. */
+  /** se a transação informou referência, o referenceTransactionId é obrigatório */
   markProcessed(referenceTransactionId: string | null, observedBalance: Money, at: Date = new Date()): void {
     this.assertOpen();
     if ((this.referenceExternalTransactionId !== null) !== (referenceTransactionId !== null)) {
@@ -295,7 +295,7 @@ export class WagerTransaction {
     return this.payloadHash === payloadHash;
   }
 
-  /** Direção do lançamento. ROLLBACK inverte a direção da referência. */
+  /** direção do lançamento. no ROLLBACK é o inverso da referência */
   ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
     switch (this.kind) {
       case 'OPENING':

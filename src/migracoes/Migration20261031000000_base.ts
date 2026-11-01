@@ -1,12 +1,11 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Migration de base: fixa o fuso do banco em UTC, para que timestamps exibidos e
- * funções como now()::date não dependam do fuso do servidor. As tabelas do domínio
- * chegam na Etapa 3.
+ * migration de base: deixo o fuso do banco em UTC, pra timestamp exibido e coisas como
+ * now()::date não dependerem do fuso do servidor.
  *
- * ALTER DATABASE precisa do nome literal; current_database() deixa a migration
- * funcionar igual no banco da aplicação e no de testes.
+ * ALTER DATABASE precisa do nome literal; com current_database() a mesma migration
+ * funciona no banco da aplicação e no de testes.
  */
 export class Migration20261031000000_base extends Migration {
   override up(): void {

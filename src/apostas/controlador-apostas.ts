@@ -37,7 +37,7 @@ export class WageringController {
     @Inject(WageringQueries) private readonly queries: WageringQueries,
   ) {}
 
-  /** Idempotency-Key é obrigatório e é a fonte da verdade; sugerido "{providerId}:{externalTransactionId}". */
+  /** Idempotency-Key é obrigatório e manda em tudo; o padrão sugerido é "{providerId}:{externalTransactionId}" */
   @Post('wagering/transactions')
   async submit(
     @Headers('idempotency-key') idempotencyKey: string | undefined,

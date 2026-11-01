@@ -8,8 +8,8 @@ interface HttpResponse {
   setHeader(name: string, value: string): unknown;
 }
 
-// Erros de domínio que chegam aqui são entrada inválida. Regras de negócio
-// (saldo insuficiente etc.) não viram exceção: a transação é gravada como REJECTED.
+// se um DomainError chegou até aqui é porque a entrada veio errada. regra de negócio
+// (tipo saldo insuficiente) não vira exceção, vira transação REJECTED gravada
 const DOMAIN_STATUS: Partial<Record<DomainErrorCode, number>> = {
   INVALID_AMOUNT: 400,
   INVALID_CURRENCY: 400,
@@ -27,13 +27,13 @@ const APPLICATION_STATUS: Record<ApplicationErrorCode, number> = {
   WALLET_BUSY: 503,
 };
 
-// Sugestão de espera para falhas transitórias (WALLET_BUSY).
+// quanto tempo eu sugiro esperar quando a falha é transitória (WALLET_BUSY)
 const RETRY_AFTER_SECONDS = '1';
 
 /**
- * Formato único de erro: { error: { code, message, details? } }.
- * HttpException do Nest (por exemplo JSON malformado, ou o 503 do /health/ready)
- * mantém o status e o corpo originais.
+ * todo erro sai no mesmo formato: { error: { code, message, details? } }.
+ * HttpException do Nest (JSON quebrado, o 503 do /health/ready) eu deixo passar
+ * com o status e o corpo que vieram.
  */
 @Catch()
 export class ErrorFilter implements ExceptionFilter {

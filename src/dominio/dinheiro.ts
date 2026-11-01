@@ -1,22 +1,22 @@
 import { DomainError } from './erro-dominio';
 
-/** Formato de Money nos contratos (HTTP, fila e eventos). */
+/** formato do Money nos contratos (HTTP, fila e eventos) */
 export interface MoneyProps {
   amount: string;
   currency: string;
 }
 
-// Até 2 casas e até 16 dígitos inteiros, o mesmo intervalo de numeric(18,2).
-// Sem sinal, sem expoente, sem espaços e sem zeros à esquerda: valores negativos não
-// entram por contrato; só surgem internamente por negate/subtract.
+// até 2 casas e até 16 dígitos inteiros, o mesmo intervalo do numeric(18,2).
+// sem sinal, sem expoente, sem espaço e sem zero à esquerda. valor negativo não entra
+// por contrato, só aparece internamente via negate/subtract
 const AMOUNT_PATTERN = /^(0|[1-9]\d{0,15})(\.\d{1,2})?$/;
 const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 const MAX_CENTS = 999_999_999_999_999_999n;
 
 /**
- * Valor monetário imutável: toda operação devolve uma nova instância. Internamente
- * guarda centavos em bigint e nunca passa por number. Entrada e saída são strings
- * decimais com escala fixa de 2 casas.
+ * valor monetário imutável: toda operação devolve uma instância nova. por dentro guardo
+ * centavos em bigint e nunca passo por number. entra e sai como string decimal com
+ * 2 casas fixas.
  */
 export class Money {
   private constructor(
@@ -26,7 +26,7 @@ export class Money {
     Object.freeze(this);
   }
 
-  /** Valida o contrato de entrada: string decimal não negativa com até 2 casas e moeda ISO-4217. */
+  /** valida a entrada: string decimal não negativa, até 2 casas, e moeda ISO-4217 */
   static from(props: MoneyProps): Money {
     if (typeof props !== 'object' || props === null) {
       throw new DomainError('INVALID_AMOUNT', 'Money deve ser { amount, currency }');
@@ -57,7 +57,7 @@ export class Money {
     return currency;
   }
 
-  /** Valor como string decimal com escala 2, por exemplo "10.50" ou "-3.00". */
+  /** valor em string com 2 casas, tipo "10.50" ou "-3.00" */
   get amount(): string {
     const sign = this.cents < 0n ? '-' : '';
     const digits = (this.cents < 0n ? -this.cents : this.cents).toString().padStart(3, '0');

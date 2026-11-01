@@ -1,6 +1,6 @@
 export type ApiErrorCode = 'INVALID_REQUEST' | 'IDEMPOTENCY_KEY_REQUIRED' | 'INTERNAL_ERROR';
 
-/** Erro da borda HTTP (forma da requisição), formatado pelo ErrorFilter. */
+/** erro de formato da requisição (camada HTTP); quem formata é o ErrorFilter */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
