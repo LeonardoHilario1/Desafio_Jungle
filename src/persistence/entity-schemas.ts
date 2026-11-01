@@ -3,7 +3,7 @@ import { WagerTransaction } from '../domain/wager-transaction';
 import { Wallet } from '../domain/wallet';
 import { WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import type { FailureCode } from '../domain/domain-error';
-import type { LedgerDirection } from '../domain/wallet-ledger-entry';
+import type { LedgerDirection, LedgerEntryKind } from '../domain/wallet-ledger-entry';
 import type { TransactionStatus, WagerType } from '../domain/wager-transaction';
 
 /*
@@ -90,7 +90,8 @@ export const WagerTransactionSchema = new EntitySchema<WagerTransactionRow>({
 interface WalletLedgerEntryRow {
   id: string;
   walletId: string;
-  transactionId: string;
+  kind: LedgerEntryKind;
+  transactionId: string | null;
   direction: LedgerDirection;
   currency: string;
   amountValue: string;
@@ -104,7 +105,8 @@ export const WalletLedgerEntrySchema = new EntitySchema<WalletLedgerEntryRow>({
   properties: {
     id: { type: 'uuid', columnType: 'uuid', primary: true },
     walletId: { type: 'uuid', columnType: 'uuid', fieldName: 'wallet_id' },
-    transactionId: { type: 'uuid', columnType: 'uuid', fieldName: 'transaction_id' },
+    kind: { type: 'string', columnType: 'varchar(16)' },
+    transactionId: { type: 'uuid', columnType: 'uuid', fieldName: 'transaction_id', nullable: true },
     direction: { type: 'string', columnType: 'varchar(6)' },
     currency: { type: 'string', columnType: 'char(3)' },
     amountValue: { ...decimal, fieldName: 'amount' },

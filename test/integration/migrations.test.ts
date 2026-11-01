@@ -76,7 +76,8 @@ describe('migrations', () => {
                         values ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001',
                                 '00000000-0000-0000-0000-000000000002', 'CREDIT', 'BRL', 10, 10)`);
 
-    await expect(orm.migrator.down()).rejects.toThrow('down recusado');
+    // allOrNothing: a falha no down do schema desfaz também o down das migrations posteriores.
+    await expect(orm.migrator.down({ to: 0 })).rejects.toThrow('down recusado');
     expect(await executedNames()).toEqual(allNames);
     expect(await tables()).toEqual(domainTables);
   });

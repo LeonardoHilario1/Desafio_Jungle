@@ -29,6 +29,21 @@ describe('Wallet.open', () => {
     expect(wallet.currency).toBe('BRL');
   });
 
+  test('openWithBalance registra o saldo inicial como lançamento de abertura', () => {
+    const { wallet, openingEntry } = Wallet.openWithBalance({ playerId: 'p', initialBalance: brl('100') });
+    expect(wallet.balance().amount).toBe('100.00');
+    expect(wallet.version()).toBe(2);
+    expect(openingEntry.kind).toBe('OPENING');
+    expect(openingEntry.transactionId).toBeNull();
+    expect(openingEntry.direction).toBe('CREDIT');
+    expect(openingEntry.balanceAfter().amount).toBe('100.00');
+  });
+
+  test('lançamento ligado a transação é do tipo TRANSACTION', () => {
+    const entry = fundedWallet('10').debit(brl('1'), 'tx-1');
+    expect(entry.kind).toBe('TRANSACTION');
+  });
+
   test('rejeita playerId vazio e moeda inválida', () => {
     expect(codeOf(() => Wallet.open({ playerId: '  ', currency: 'BRL' }))).toBe('INVALID_WALLET');
     expect(codeOf(() => Wallet.open({ playerId: 'p', currency: 'reais' }))).toBe('INVALID_CURRENCY');

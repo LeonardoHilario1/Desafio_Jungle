@@ -34,6 +34,19 @@ export class Wallet {
     return new Wallet(crypto.randomUUID(), playerId, balance.currency, balance.amount, 1, now, now);
   }
 
+  /**
+   * Abre a carteira já com saldo. O saldo inicial entra no ledger como lançamento de
+   * abertura, que deve ser gravado junto com a carteira.
+   */
+  static openWithBalance(params: { playerId: string; initialBalance: Money }): {
+    wallet: Wallet;
+    openingEntry: WalletLedgerEntry;
+  } {
+    const wallet = Wallet.open({ playerId: params.playerId, currency: params.initialBalance.currency });
+    const openingEntry = wallet.change('CREDIT', params.initialBalance, params.initialBalance, null);
+    return { wallet, openingEntry };
+  }
+
   balance(): Money {
     return Money.of(this.balanceAmount, this.currency);
   }
@@ -67,7 +80,7 @@ export class Wallet {
     direction: 'DEBIT' | 'CREDIT',
     amount: Money,
     newBalance: Money,
-    transactionId: string,
+    transactionId: string | null,
   ): WalletLedgerEntry {
     // Cria o lançamento antes de alterar o estado: se a validação falhar, a carteira fica intacta.
     const entry = WalletLedgerEntry.record({

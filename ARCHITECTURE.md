@@ -168,7 +168,81 @@ SQLSTATE e o nome da constraint. Também cobre a ida e volta pelo ORM (Money em 
 `version`). Como o ledger bloqueia `DELETE`/`TRUNCATE`, o reset entre testes descarta e
 recria as tabelas.
 
+## Etapa 4: API
+
+### Saldo inicial (decisão tomada com o responsável)
+
+O SPEC não define como uma carteira recebe saldo, e sem isso nenhuma BET é processada.
+Decisão: `POST /wallets` aceita `initialBalance` opcional. Ele entra no ledger como um
+lançamento **de abertura** (`kind = 'OPENING'`): CREDIT, sem transação de aposta, no
+máximo um por carteira (migration `Migration20261101010000_opening_balance`). Assim,
+saldo = soma do ledger vale desde a criação. Depósitos posteriores ficam fora do MVP.
+
+### Processamento de `POST /wagering/transactions`
+
+Tudo numa única transação de banco (`READ COMMITTED`):
+
+1. `set local lock_timeout = '5s'`.
+2. `SELECT ... FOR UPDATE` na carteira. Requisições para a mesma carteira são
+   serializadas aqui; carteiras diferentes não disputam lock entre si.
+3. Com o lock na mão, busca a `Idempotency-Key`. Em `READ COMMITTED` cada comando vê
+   o que já foi commitado, então uma requisição concorrente com a mesma chave, que pegou
+   o lock antes, já está visível. Mesmo `payloadHash` vira replay; hash diferente vira 409.
+4. Aplica a regra:
+   - BET: debita se houver saldo; senão grava REJECTED/`INSUFFICIENT_FUNDS`.
+   - WIN/LOSS: procura a BET pela chave. Se ainda não chegou, grava PENDING_REFERENCE.
+     Se não puder liquidar (BET rejeitada, de outra carteira, já liquidada), grava REJECTED.
+     Senão, WIN credita, LOSS só liquida.
+5. Grava transação, saldo (com `version` + 1) e lançamento, e faz commit.
+
+**Mesma chave em carteiras diferentes ao mesmo tempo.** O lock por carteira não
+serializa esse caso. O `UNIQUE (idempotency_key)` barra o segundo insert, e o resultado
+é decidido relendo o registro vencedor (replay ou 409).
+
+**Não persistidos (nada muda, e repetir é seguro):** entrada inválida (400), carteira
+inexistente (404), moeda diferente da carteira (422 `CURRENCY_MISMATCH`, porque a FK
+composta não permitiria gravar), timeout de lock (503 `WALLET_BUSY`) e erro inesperado
+(500). Esses casos não consomem a chave de idempotência.
+
+### Status HTTP
+
+| Situação | Status | Corpo |
+| --- | --- | --- |
+| PROCESSED | 201 | transação |
+| PENDING_REFERENCE | 202 | transação |
+| REJECTED (regra de negócio, gravada) | 422 | transação com `failureCode` |
+| Replay | o mesmo da primeira resposta | o mesmo, com header `Idempotent-Replayed: true` |
+| Mesma chave, payload diferente | 409 `IDEMPOTENCY_KEY_CONFLICT` | erro |
+| Entrada inválida / header ausente | 400 | erro |
+| Carteira inexistente | 404 `WALLET_NOT_FOUND` | erro |
+| Moeda diferente da carteira | 422 `CURRENCY_MISMATCH` | erro |
+| Carteira duplicada (jogador+moeda) | 409 `WALLET_ALREADY_EXISTS`, com `details.walletId` | erro |
+| Lock não obtido em 5 s | 503 `WALLET_BUSY` | erro |
+
+O status deriva só do estado gravado, por isso o replay reproduz a resposta original.
+Erros têm o formato `{ "error": { "code", "message", "details"? } }`.
+
+**FAILED.** Este endpoint não produz FAILED. Uma falha inesperada desfaz a transação
+inteira (500) e o cliente pode repetir com a mesma chave. Gravar FAILED tornaria uma falha
+transitória definitiva. O estado fica reservado para processamento assíncrono (consumidor
+e reprocessamento), fora do MVP.
+
+### Validação de entrada
+
+Manual (`src/api/request.ts`), sem `class-validator`: tipo dos campos e rejeição de
+campos desconhecidos. As regras de valor ficam no domínio. `amount` precisa ser string;
+`10` como number é 400.
+
+### Autenticação
+
+`AuthGuard` sem efeito, aplicado aos controllers de carteira e de apostas como ponto de
+extensão (desenho na Etapa 7).
+
 ## Limitações conhecidas (até aqui)
+
+- Transações em PENDING_REFERENCE não são reprocessadas quando a BET chega depois.
+  Replay da mesma chave devolve o PENDING_REFERENCE gravado.
+- Sem depósitos depois da abertura.
 
 - Os triggers não protegem contra o **dono** das tabelas, que pode desabilitá-los, nem
   contra `DROP`. Em produção, a aplicação usaria uma role sem ownership, com só

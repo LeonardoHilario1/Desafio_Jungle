@@ -4,9 +4,9 @@ Serviço que processa transações de apostas, atualiza o saldo de carteiras e m
 ledger imutável, continuando correto com entrega at-least-once. As decisões de desenho
 estão em [ARCHITECTURE.md](ARCHITECTURE.md) e o escopo em [SPEC.md](SPEC.md).
 
-> Status: **Etapas 1 a 3** concluídas: infraestrutura, health checks, modelo de domínio
-> (`src/domain`), schema com constraints e mapeamento ORM. A API ainda não foi
-> implementada.
+> Status: **Etapas 1 a 4** concluídas: infraestrutura, domínio, schema com constraints e
+> API de carteiras e apostas (BET, WIN, LOSS) com idempotência e lock por carteira.
+> Outbox/SQS ainda não foi implementado.
 
 ## Stack
 
@@ -29,6 +29,27 @@ e termina, e só então o `app` sobe. O script de init do LocalStack cria a fila
 | ------ | --------------- | ---------------------------------------------------------------------- |
 | GET    | `/health/live`  | 200 enquanto o processo está de pé; não consulta dependências.          |
 | GET    | `/health/ready` | 200 se PostgreSQL e a fila SQS respondem; 503 com o detalhe de cada check. |
+| POST   | `/wallets`      | Cria carteira (`playerId`, `currency`, `initialBalance` opcional).      |
+| GET    | `/wallets/:id`  | Consulta carteira e saldo.                                             |
+| POST   | `/wagering/transactions` | BET, WIN ou LOSS. Header `Idempotency-Key` obrigatório.     |
+
+Exemplo:
+
+```bash
+curl -s -X POST localhost:3000/wallets -H 'content-type: application/json' \
+  -d '{"playerId":"p1","currency":"BRL","initialBalance":"100.00"}'
+
+curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json' \
+  -H 'Idempotency-Key: bet-123' \
+  -d '{"walletId":"<id>","type":"BET","amount":"30.00","currency":"BRL"}'
+
+curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json' \
+  -H 'Idempotency-Key: win-123' \
+  -d '{"walletId":"<id>","type":"WIN","amount":"75.00","currency":"BRL","referenceKey":"bet-123"}'
+```
+
+Valores monetários são sempre strings com até 2 casas. Status HTTP e códigos de erro
+estão no [ARCHITECTURE.md](ARCHITECTURE.md#status-http).
 
 ## Desenvolvimento local
 
