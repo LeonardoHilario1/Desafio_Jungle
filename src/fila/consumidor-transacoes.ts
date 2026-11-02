@@ -16,6 +16,7 @@ import type { ConsumerConfig, SqsConfig } from '../configuracao';
 import { DomainError } from '../dominio/erro-dominio';
 import { sha256Hex } from '../dominio/hash-payload';
 import type { SubmittableKind } from '../dominio/transacao-aposta';
+import { addTrace, runWithTrace } from '../observabilidade/contexto';
 
 export const MESSAGE_TYPE = 'WagerTransactionRequested';
 const MAX_BACKOFF_SECONDS = 300;
@@ -97,7 +98,14 @@ export class WagerTransactionConsumer {
     return outcomes;
   }
 
-  async handle(message: Message): Promise<ConsumeOutcome> {
+  /** cada mensagem roda no seu próprio contexto de rastreio, que vai pros logs */
+  handle(message: Message): Promise<ConsumeOutcome> {
+    return runWithTrace({ ...(message.MessageId !== undefined && { messageId: message.MessageId }) }, () =>
+      this.handleTraced(message),
+    );
+  }
+
+  private async handleTraced(message: Message): Promise<ConsumeOutcome> {
     const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? '1');
 
     let parsed: ParsedMessage;
@@ -109,6 +117,7 @@ export class WagerTransactionConsumer {
 
     const { messageId, command } = parsed;
     const correlationId = message.MessageAttributes?.correlationId?.StringValue ?? messageId;
+    addTrace({ messageId, correlationId });
     try {
       const result = await this.processWager.execute(
         command,

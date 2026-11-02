@@ -14,6 +14,9 @@ import { RetryPendingReferences } from './aplicacao/reprocessar-pendencias';
 import { WagerTransactionConsumer } from './fila/consumidor-transacoes';
 import { ConsumerWorker } from './fila/worker-consumidor';
 import { PendingReferenceWorker } from './pendencias/worker-pendencias';
+import { Logger } from '@nestjs/common';
+import { MetricsController } from './observabilidade/controlador-metricas';
+import { Metrics } from './observabilidade/metricas';
 import { APP_CONFIG, type AppConfig } from './configuracao';
 import { HealthController } from './saude/controlador-saude';
 import { ReadinessService } from './saude/verificacao-prontidao';
@@ -32,9 +35,11 @@ export class AppModule {
     return {
       module: AppModule,
       imports: [MikroOrmModule.forRoot(ormOptions(config.db))],
-      controllers: [HealthController, WalletsController, WageringController],
+      controllers: [HealthController, MetricsController, WalletsController, WageringController],
       providers: [
         { provide: APP_CONFIG, useValue: config },
+        // uma instância de métricas por aplicação
+        { provide: Metrics, useValue: new Metrics() },
         {
           provide: SQSClient,
           useFactory: () =>
@@ -69,20 +74,39 @@ export class AppModule {
         RetryPendingReferences,
         {
           provide: WagerTransactionConsumer,
-          useFactory: (process: ProcessWagerTransaction, failure: RecordPermanentFailure, sqs: SQSClient) =>
-            new WagerTransactionConsumer(process, failure, sqs, config.sqs, config.consumer),
-          inject: [ProcessWagerTransaction, RecordPermanentFailure, SQSClient],
+          useFactory: (process: ProcessWagerTransaction, failure: RecordPermanentFailure, sqs: SQSClient, metrics: Metrics) =>
+            new WagerTransactionConsumer(process, failure, sqs, config.sqs, config.consumer, consumerObserver(metrics)),
+          inject: [ProcessWagerTransaction, RecordPermanentFailure, SQSClient, Metrics],
         },
         ConsumerWorker,
         PendingReferenceWorker,
         {
           provide: OutboxPublisher,
-          useFactory: (orm: MikroORM, sqs: SQSClient) => new OutboxPublisher(orm, sqs, config.sqs.outboxQueueName),
-          inject: [MikroORM, SQSClient],
+          useFactory: (orm: MikroORM, sqs: SQSClient, metrics: Metrics) =>
+            new OutboxPublisher(orm, sqs, config.sqs.outboxQueueName, metrics),
+          inject: [MikroORM, SQSClient, Metrics],
         },
         OutboxPublisherWorker,
         { provide: APP_FILTER, useClass: ErrorFilter },
       ],
     };
   }
+}
+
+/** conta e loga o resultado de cada mensagem da fila */
+function consumerObserver(metrics: Metrics) {
+  const logger = new Logger('WagerTransactionConsumer');
+  return {
+    onOutcome(outcome: string, info: { errorCode?: string }) {
+      metrics.inc('wagering_consumer_messages_total', { outcome: outcome.toLowerCase() });
+      if (outcome === 'RETRY') {
+        metrics.inc('wagering_consumer_retries_total');
+        logger.warn({ msg: 'falha transitória, mensagem volta pra fila com backoff', errorCode: info.errorCode });
+      } else if (outcome === 'DEAD_LETTERED') {
+        // RETRIES_EXHAUSTED:WALLET_BUSY vira o motivo RETRIES_EXHAUSTED
+        metrics.inc('wagering_dlq_messages_total', { reason: (info.errorCode ?? 'UNKNOWN').split(':')[0]! });
+        logger.error({ msg: 'mensagem mandada pra DLQ', errorCode: info.errorCode });
+      }
+    },
+  };
 }

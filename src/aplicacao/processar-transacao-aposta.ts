@@ -1,4 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { addTrace } from '../observabilidade/contexto';
+import { Metrics } from '../observabilidade/metricas';
 import type { EventContext } from '../dominio/eventos/evento-integracao';
 import { Money, type MoneyProps } from '../dominio/dinheiro';
 import { InboxMessage } from '../dominio/mensagem-inbox';
@@ -65,12 +67,53 @@ export interface InboxReceipt {
  */
 @Injectable()
 export class ProcessWagerTransaction {
+  private readonly logger = new Logger(ProcessWagerTransaction.name);
+
   constructor(
     @Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork,
     @Inject(REFERENCE_RETRY_POLICY) private readonly policy: ReferenceRetryPolicy,
+    @Inject(Metrics) private readonly metrics: Metrics = new Metrics(),
   ) {}
 
   async execute(command: WagerTransactionCommand, ctx: EventContext, inbox?: InboxReceipt): Promise<WagerResult> {
+    const source = inbox ? 'sqs' : 'http';
+    const started = performance.now();
+    addTrace({ walletId: command.walletId, providerId: command.providerId });
+    try {
+      const result = await this.handle(command, ctx, inbox);
+      this.record(result, source, performance.now() - started);
+      return result;
+    } catch (error) {
+      if (error instanceof ApplicationError && error.code === 'WALLET_BUSY') {
+        this.metrics.inc('wagering_lock_timeouts_total', { source });
+        this.logger.warn({ msg: 'carteira ocupada: lock não obtido a tempo', source });
+      }
+      throw error;
+    } finally {
+      this.metrics.observe('wagering_processing_duration_seconds', (performance.now() - started) / 1000, { source });
+    }
+  }
+
+  /** conta e loga o resultado; sem valores de dinheiro no log */
+  private record(result: WagerResult, source: string, durationMs: number): void {
+    const tx = result.transaction;
+    addTrace({ transactionId: tx.id });
+    if (result.duplicateMessage) this.metrics.inc('wagering_inbox_duplicates_total');
+    else if (result.idempotentReplay) this.metrics.inc('wagering_idempotent_replays_total', { source });
+    else this.metrics.inc('wagering_transactions_total', { source, kind: tx.kind, status: tx.status });
+    this.logger.log({
+      msg: result.idempotentReplay ? 'transação repetida (replay)' : 'transação tratada',
+      source,
+      kind: tx.kind,
+      status: tx.status,
+      ...(tx.failureCode !== null && { failureCode: tx.failureCode }),
+      idempotentReplay: result.idempotentReplay,
+      ...(result.duplicateMessage && { duplicateMessage: true }),
+      durationMs: Math.round(durationMs),
+    });
+  }
+
+  private async handle(command: WagerTransactionCommand, ctx: EventContext, inbox?: InboxReceipt): Promise<WagerResult> {
     // valido a forma e calculo o payloadHash antes de abrir transação
     const candidate = WagerTransaction.create({ ...command, money: Money.from(command.money), correlationId: ctx.correlationId });
 

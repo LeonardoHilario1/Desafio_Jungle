@@ -6,6 +6,8 @@ export function testConfig(): AppConfig {
   const env = process.env;
   return {
     port: 0,
+    // só avisos e erros nos testes, pra saída não virar ruído
+    logLevel: 'warn',
     db: {
       host: env.TEST_DB_HOST ?? 'localhost',
       port: Number(env.TEST_DB_PORT ?? 5432),

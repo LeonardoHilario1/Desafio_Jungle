@@ -1,3 +1,5 @@
+import { LOG_LEVELS, type LogLevel } from './observabilidade/logger-json';
+
 export interface DatabaseConfig {
   host: string;
   port: number;
@@ -52,6 +54,8 @@ export interface OutboxConfig {
 
 export interface AppConfig {
   port: number;
+  /** error, warn, info ou debug */
+  logLevel: LogLevel;
   db: DatabaseConfig;
   sqs: SqsConfig;
   outbox: OutboxConfig;
@@ -60,6 +64,7 @@ export interface AppConfig {
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
+
 
 type Env = Record<string, string | undefined>;
 
@@ -126,8 +131,13 @@ export function loadDatabaseConfig(env: Env = process.env): DatabaseConfig {
 }
 
 export function loadConfig(env: Env = process.env): AppConfig {
+  const logLevel = optional(env, 'LOG_LEVEL', 'info');
+  if (!(LOG_LEVELS as readonly string[]).includes(logLevel)) {
+    throw new Error(`Variável de ambiente LOG_LEVEL deve ser ${LOG_LEVELS.join(', ')}: ${logLevel}`);
+  }
   return {
     port: port(env, 'PORT'),
+    logLevel: logLevel as LogLevel,
     db: loadDatabaseConfig(env),
     sqs: {
       region: required(env, 'AWS_REGION'),

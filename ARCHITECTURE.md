@@ -18,12 +18,13 @@ do desafio. Setup e comandos estão no [README.md](README.md).
 10. [Eventos e outbox](#eventos-e-outbox)
 11. [Processamento por SQS](#processamento-por-sqs)
 12. [Referências fora de ordem](#referências-fora-de-ordem)
-13. [Infraestrutura e operação](#infraestrutura-e-operação)
-14. [Testes](#testes)
-15. [Autenticação (desenho, não implementado)](#autenticação-desenho-não-implementado)
-16. [Trade-offs](#trade-offs)
-17. [Limitações e pendências](#limitações-e-pendências)
-18. [Quem decidiu o quê](#quem-decidiu-o-quê)
+13. [Observabilidade](#observabilidade)
+14. [Infraestrutura e operação](#infraestrutura-e-operação)
+15. [Testes](#testes)
+16. [Autenticação (desenho, não implementado)](#autenticação-desenho-não-implementado)
+17. [Trade-offs](#trade-offs)
+18. [Limitações e pendências](#limitações-e-pendências)
+19. [Quem decidiu o quê](#quem-decidiu-o-quê)
 
 ## Visão geral
 
@@ -62,6 +63,7 @@ Os nomes de pastas e arquivos em `src` estão em português. Os identificadores 
 | `src/outbox` | publisher e worker |
 | `src/fila` | consumidor da fila de entrada (inbox, retry, DLQ) e o worker dele |
 | `src/pendencias` | worker que reprocessa `PENDING_REFERENCE` |
+| `src/observabilidade` | contexto de rastreio, logger JSON, métricas e `GET /metrics` |
 | `src/api`, `src/autenticacao`, `src/saude` | validação de entrada e filtro de erros, guard de autenticação, health checks |
 
 ## Conformidade com as restrições invioláveis
@@ -446,6 +448,40 @@ O mapeamento é o mesmo em todos os endpoints:
 - **Replay** de uma pendência que já foi liberada devolve o estado atual (por exemplo
   PROCESSED), não o 202 original: o estado mudou de verdade.
 
+## Observabilidade
+
+- **Logs estruturados:** `JsonLogger` substitui o logger do Nest e escreve uma linha JSON
+  por evento: `time`, `level`, `context`, `msg` e os campos de rastreio do contexto atual
+  (`correlationId`, `messageId`, `transactionId`, `walletId`, `providerId`). O contexto é
+  um `AsyncLocalStorage`: aberto pelo middleware HTTP e por mensagem no consumidor, e
+  completado pelo caso de uso quando descobre a transação. Nível por `LOG_LEVEL`.
+- **Sem dados sensíveis:** os logs dizem o que aconteceu (kind, status, `failureCode`,
+  duração, se foi replay), nunca o payload nem valores de dinheiro. A única exceção é a
+  `difference` de uma reconciliação divergente, que é exatamente o que precisa ser
+  investigado.
+- **correlationId:** `X-Correlation-Id` recebido (se bem formado) ou gerado; volta no
+  header da resposta, é gravado na transação e vai no envelope dos eventos. Na fila, vem
+  do atributo `correlationId` da mensagem ou do `messageId`.
+- **Métricas** em `GET /metrics` (formato Prometheus, implementação própria e pequena, sem
+  dependência):
+
+  | Métrica | O que mede |
+  | --- | --- |
+  | `wagering_transactions_total{source,kind,status}` | transações por status (http, sqs) |
+  | `wagering_idempotent_replays_total{source}`, `wagering_inbox_duplicates_total` | duplicatas detectadas |
+  | `wagering_consumer_retries_total`, `wagering_pending_reference_checks_total{result}` | retries |
+  | `wagering_dlq_messages_total{reason}`, `wagering_consumer_messages_total{outcome}` | mensagens em DLQ e resultado do consumo |
+  | `wagering_lock_timeouts_total{source}` | conflitos de lock (desistências esperando a carteira) |
+  | `wagering_outbox_lag_seconds`, `wagering_outbox_pending_messages` | atraso da outbox (calculado no scrape) |
+  | `wagering_processing_duration_seconds{source}` | latência de processamento (histograma) |
+  | `wagering_outbox_published_total`, `wagering_outbox_publish_failures_total` | publicação |
+  | `wagering_reconciliations_total{result}`, `wagering_pending_references` | reconciliação e pendências |
+
+  As séries são por instância (em memória); o Prometheus soma as instâncias. O
+  `/metrics` fica aberto, como o health; em produção ficaria numa porta interna.
+- **Health checks:** `/health/live` (processo) e `/health/ready` (PostgreSQL e as filas
+  SQS que a instância usa).
+
 ## Infraestrutura e operação
 
 - **Docker Compose:** `postgres` 16; `localstack` 4.4 (só SQS, filas criadas por script de
@@ -461,7 +497,7 @@ O mapeamento é o mesmo em todos os endpoints:
 
 ## Testes
 
-`bun test` roda 244 testes (unidade e integração); `bun run test:concurrency` roda o
+`bun test` roda 287 testes (unidade e integração); `bun run test:concurrency` roda o
 arquivo de concorrência 20 vezes (320 execuções, cerca de 110 s).
 
 | Suíte | O que cobre |
@@ -472,6 +508,11 @@ arquivo de concorrência 20 vezes (320 execuções, cerca de 110 s).
 | `wallets-api.test.ts`, `wagering-api.test.ts` | contrato, status HTTP, idempotência, regras e consultas; invariantes após cada teste |
 | `outbox.test.ts` | atomicidade, nada publicado antes do commit, 4 publishers sem duplicata, falha com backoff, crash antes de publicar, imutabilidade, worker |
 | `concurrency.test.ts` | **três instâncias** com pools separados |
+| `ledger-api.test.ts` | paginação por cursor (estável com escrita no meio) e reconciliação |
+| `consumer.test.ts` | inbox e reentrega, **worker morto depois do commit e antes do ack**, DLQ, retry com backoff até a DLQ, FAILED, 3 consumidores com duplicatas |
+| `pending-reference.test.ts` | liberação imediata (inclusive em cadeia), worker com limite (`REFERENCE_NOT_FOUND`), referência em outra carteira, 3 workers concorrentes |
+| `restart.test.ts` | **reinício do serviço** no meio do processamento da fila, com tudo ligado (consumidor, publisher, worker): a segunda instância termina e o estado final é consistente |
+| `observability.test.ts`, `test/unit/observability.test.ts` | correlationId, `/metrics`, logger JSON |
 
 **Cenários de concorrência** (invariantes conferidas no banco depois de cada um):
 
@@ -523,10 +564,11 @@ Desenho previsto com um IdP externo (Keycloak ou Zitadel no Compose):
 
 ## Limitações e pendências
 
-**Pendente nas próximas etapas:**
+**Não implementado:**
 
-- **Etapa 11:** logs JSON com `correlationId` e métricas; testes de crash antes do ack,
-  reinício e DLQ.
+- **Autenticação** ([desenho acima](#autenticação-desenho-não-implementado)).
+- **Teste de carga** (`bun run test:load`, diferencial opcional).
+- **OpenTelemetry e dashboard** (opcionais).
 
 **Limitações conhecidas:**
 
@@ -550,3 +592,8 @@ Desenho previsto com um IdP externo (Keycloak ou Zitadel no Compose):
   consolidação das migrations, uma reversão por referência de qualquer tipo, rejeições de
   moeda e jogador gravadas, `wallet_version` no ledger, `eventId` determinístico,
   taxonomia de `failureCode` e o mapeamento de status HTTP.
+- **Proposto pela IA nas Etapas 9 a 11** (o responsável pediu para seguir até o fim sem
+  parar entre elas): cursor pela `wallet_version`, mensagens permanentes direto para a
+  DLQ, FAILED gravado ao esgotar as tentativas, liberação imediata das pendências da mesma
+  carteira, política de 10 tentativas (uns 5 minutos) para referências, métricas sem
+  dependência externa e `/metrics` aberto.

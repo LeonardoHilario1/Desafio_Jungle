@@ -24,8 +24,9 @@ Desenvolvido para o desafio técnico da Jungle Gaming.
   depois do commit, retry com backoff e dead-letter.
 - **Fora de ordem:** um REFUND que chega antes da aposta espera e é aplicado quando ela
   chega.
+- **Observável:** logs JSON com `correlationId` e métricas Prometheus em `/metrics`.
 - **Testado de verdade:** PostgreSQL e LocalStack reais, com três instâncias disputando a
-  mesma carteira.
+  mesma carteira, worker morto antes do ack e reinício no meio do processamento.
 
 ## Stack
 
@@ -155,6 +156,7 @@ docker compose exec localstack awslocal sqs receive-message \
 | --- | --- | --- |
 | GET | `/health/live` | processo vivo |
 | GET | `/health/ready` | PostgreSQL e SQS alcançáveis (503 se não) |
+| GET | `/metrics` | métricas no formato Prometheus |
 | POST | `/wallets` | cria carteira com `playerId` e `initialBalance` |
 | GET | `/wallets/:walletId` | carteira e saldo |
 | GET | `/wallets/:walletId/ledger?cursor=...&limit=50` | lançamentos da carteira, paginados por cursor |
@@ -214,6 +216,9 @@ provedor ──HTTP──▶ NestJS (N instâncias)
 | `src/migracoes` | migrations SQL com as constraints e triggers |
 | `src/carteiras`, `src/apostas` | controllers HTTP |
 | `src/outbox` | publicação dos eventos no SQS |
+| `src/fila` | consumidor da fila de entrada |
+| `src/pendencias` | reprocessamento das transações que esperam a referência |
+| `src/observabilidade` | logs JSON, métricas e correlationId |
 
 As decisões, os trade-offs e as limitações estão explicados no
 [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -226,7 +231,7 @@ separado (`wagering_test`), sem mock do banco.
 ```bash
 bun install
 docker compose up -d postgres localstack
-bun test                     # 244 testes
+bun test                     # 287 testes
 bun run test:concurrency     # testes de concorrência repetidos 20 vezes
 ```
 
@@ -239,6 +244,8 @@ O que é testado:
   com backoff e três consumidores ao mesmo tempo.
 - **Fora de ordem:** pendências liberadas quando a referência chega, worker com limite de
   tentativas.
+- **Reinício:** uma instância cai no meio do processamento da fila e outra termina, com o
+  estado final conferido.
 - **Concorrência:** três instâncias da aplicação ao mesmo tempo, incluindo o cenário do
   desafio (saldo 100.00 e duas apostas de 80.00 simultâneas: uma passa, a outra é
   recusada, saldo final 20.00).
@@ -274,6 +281,7 @@ bun run start
 | Variável | Obrigatória | Padrão | Descrição |
 | --- | --- | --- | --- |
 | `PORT` | sim | | porta HTTP |
+| `LOG_LEVEL` | não | `info` | `error`, `warn`, `info` ou `debug` |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | sim | | PostgreSQL |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | sim | | credenciais SQS (`test`/`test` no LocalStack) |
 | `SQS_ENDPOINT` | sim | | endpoint do SQS |
@@ -306,11 +314,13 @@ Postgres. Se o volume já existia, recrie com `docker compose down -v`.
 - ledger paginado por cursor e reconciliação de saldo;
 - consumidor SQS com inbox, retry, DLQ e shutdown gracioso;
 - reprocessamento das transações que chegam antes da referência;
+- logs estruturados e métricas;
 - testes com várias instâncias.
 
 **Próximos passos:**
 
-- logs estruturados e métricas.
+- teste de carga (`bun run test:load`);
+- OpenTelemetry e dashboard.
 
 Autenticação ficou fora do escopo. O desenho previsto, com um Identity Provider externo,
 está no [ARCHITECTURE.md](ARCHITECTURE.md#autenticação-desenho-não-implementado).
@@ -344,6 +354,8 @@ só então autorizava a seguinte.
   passou a exigir a suíte verde.
 - Uma afirmação errada sobre a API do domínio, corrigida no resumo da etapa.
 - Um bug na validação de `money`, pego pelos testes de integração antes do commit.
+- O healthcheck do Postgres no Compose, escrito na primeira etapa, liberava as migrations
+  cedo demais com um volume novo. Apareceu num teste ponta a ponta e foi corrigido.
 
 **Verificação feita pela IA:**
 

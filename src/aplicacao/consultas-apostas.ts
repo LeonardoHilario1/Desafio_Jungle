@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Metrics } from '../observabilidade/metricas';
 import type { WalletLedgerEntry } from '../dominio/lancamento-ledger';
 import { Reconciliation } from '../dominio/reconciliacao';
 import type { WagerTransaction } from '../dominio/transacao-aposta';
@@ -17,7 +18,10 @@ export interface LedgerPage {
 export class WageringQueries {
   private readonly logger = new Logger(WageringQueries.name);
 
-  constructor(@Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork) {}
+  constructor(
+    @Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork,
+    @Inject(Metrics) private readonly metrics: Metrics = new Metrics(),
+  ) {}
 
   async wallet(walletId: string): Promise<Wallet> {
     const wallet = await this.uow.read((store) => store.findWallet(walletId));
@@ -64,8 +68,10 @@ export class WageringQueries {
       calculatedBalance: snapshot.calculated,
       checkedEntries: snapshot.entries,
     });
+    this.metrics.inc('wagering_reconciliations_total', { result: result.consistent ? 'consistent' : 'divergent' });
     if (!result.consistent) {
-      this.logger.warn(`divergência de saldo na carteira ${walletId}: diferença ${result.difference}`);
+      // a diferença vai pro log porque é exatamente o que alguém precisa investigar
+      this.logger.warn({ msg: 'divergência de saldo na reconciliação', walletId, difference: result.difference.amount });
     }
     return result;
   }

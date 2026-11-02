@@ -1,4 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { runWithTrace } from '../observabilidade/contexto';
+import { Metrics } from '../observabilidade/metricas';
 import type { ReferenceRetryPolicy } from '../dominio/politica-referencia';
 import type { WagerTransactionStatus } from '../dominio/transacao-aposta';
 import { REFERENCE_RETRY_POLICY, settle } from './liquidacao';
@@ -36,9 +38,12 @@ const BATCH_SIZE = 20;
  */
 @Injectable()
 export class RetryPendingReferences {
+  private readonly logger = new Logger(RetryPendingReferences.name);
+
   constructor(
     @Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork,
     @Inject(REFERENCE_RETRY_POLICY) private readonly policy: ReferenceRetryPolicy,
+    @Inject(Metrics) private readonly metrics: Metrics = new Metrics(),
   ) {}
 
   async runOnce(now: Date = new Date()): Promise<PendingRunResult> {
@@ -62,6 +67,12 @@ export class RetryPendingReferences {
         // carteira ocupada: fica pra próxima volta
         if (!(error instanceof LockTimeoutError)) throw error;
         status = 'SKIPPED';
+      }
+      this.metrics.inc('wagering_pending_reference_checks_total', { result: status.toLowerCase() });
+      if (status !== 'SKIPPED' && status !== 'PENDING_REFERENCE') {
+        runWithTrace({ transactionId: candidate.id, walletId: candidate.walletId }, () =>
+          this.logger.log({ msg: 'pendência resolvida pelo worker', status }),
+        );
       }
       if (status === 'PROCESSED') result.processed += 1;
       else if (status === 'REJECTED') result.rejected += 1;

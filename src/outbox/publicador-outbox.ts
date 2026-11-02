@@ -2,6 +2,7 @@ import { GetQueueUrlCommand, SendMessageBatchCommand, type SQSClient } from '@aw
 import { LockMode } from '@mikro-orm/core';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import type { OutboxMessage } from '../dominio/mensagem-outbox';
+import { Metrics } from '../observabilidade/metricas';
 import { OutboxMessageRecord } from '../persistencia/esquemas-entidades';
 import { outboxFromRecord, writeOutboxMessage } from '../persistencia/mapeadores';
 
@@ -32,6 +33,7 @@ export class OutboxPublisher {
     private readonly orm: MikroORM,
     private readonly sqs: SQSClient,
     private readonly queueName: string,
+    private readonly metrics: Metrics = new Metrics(),
   ) {}
 
   /** publica um lote de mensagens que já venceram */
@@ -57,7 +59,10 @@ export class OutboxPublisher {
         }
         writeOutboxMessage(message, record);
       });
-      return { published: messages.length - failures.size, failed: failures.size };
+      const published = messages.length - failures.size;
+      if (published > 0) this.metrics.inc('wagering_outbox_published_total', {}, published);
+      if (failures.size > 0) this.metrics.inc('wagering_outbox_publish_failures_total', {}, failures.size);
+      return { published, failed: failures.size };
     });
   }
 

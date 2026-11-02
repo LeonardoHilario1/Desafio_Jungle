@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { MoneyProps } from '../dominio/dinheiro';
 import type { EventContext } from '../dominio/eventos/evento-integracao';
+import { currentTrace } from '../observabilidade/contexto';
 import { ApiError } from './erro-api';
 
 // validação da forma do corpo feita na mão. aqui eu só checo tipo e campos conhecidos;
@@ -66,9 +67,16 @@ export function requireUuid(value: string, field: string): string {
 }
 
 /** uso o X-Correlation-Id que veio (se estiver bem formado), senão gero um. vai pros logs e eventos */
+/** X-Correlation-Id bem formado, ou null */
+export function validCorrelationId(header: string | undefined): string | null {
+  return header !== undefined && CORRELATION_ID_PATTERN.test(header) ? header : null;
+}
+
 export function eventContext(correlationHeader: string | undefined, causationId?: string): EventContext {
   const correlationId =
-    correlationHeader !== undefined && CORRELATION_ID_PATTERN.test(correlationHeader) ? correlationHeader : randomUUID();
+    correlationHeader !== undefined && CORRELATION_ID_PATTERN.test(correlationHeader)
+      ? correlationHeader
+      : (currentTrace().correlationId ?? randomUUID());
   return { correlationId, ...(causationId !== undefined && { causationId }) };
 }
 
