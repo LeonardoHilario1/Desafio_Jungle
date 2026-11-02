@@ -385,5 +385,3 @@ só então autorizava a seguinte.
     fluxo com lock e idempotência.
 - **Alterações manuais:** não alterei código à mão. Os ajustes que quis, pedi à IA e
   revisei o resultado.
-#   D e s a f i o _ J u n g l e  
- 
