@@ -2,6 +2,7 @@ import { InvalidTransactionStateError, type FailureCode } from './erro-dominio';
 import type { WagerTransaction, WagerTransactionKind } from './transacao-aposta';
 import type { Wallet } from './carteira';
 import type { WalletLedgerEntry } from './lancamento-ledger';
+import { DEFAULT_REFERENCE_RETRY, nextReferenceCheck, type ReferenceRetryPolicy } from './politica-referencia';
 
 /** o que o caso de uso leu do banco (já com o lock da carteira) pra eu poder decidir */
 export interface ReferenceContext {
@@ -31,8 +32,10 @@ const ALLOWED_REFERENCES: Partial<Record<WagerTransactionKind, readonly WagerTra
  *
  * a ordem das checagens:
  * 1. moeda e jogador da operação contra a carteira;
- * 2. referência: se não chegou ou ainda está aberta, espera; se chegou, tem que estar
- *    PROCESSED, ser do mesmo jogador, carteira, moeda e rodada, e de um tipo permitido;
+ * 2. referência: se não chegou ou ainda está aberta, espera (PENDING_REFERENCE, com a
+ *    próxima checagem agendada pela política; quando as tentativas acabam, vira
+ *    REFERENCE_NOT_FOUND); se chegou, tem que estar PROCESSED, ser do mesmo jogador,
+ *    carteira, moeda e rodada, e de um tipo permitido;
  * 3. reversões: mesmo valor da referência e nenhuma reversão anterior dela;
  * 4. efeito no saldo: débito sem saldo é rejeitado (INSUFFICIENT_FUNDS na BET,
  *    REVERSAL_INSUFFICIENT_FUNDS no ROLLBACK).
@@ -42,6 +45,7 @@ export function applyWager(
   tx: WagerTransaction,
   ctx: ReferenceContext,
   at: Date = new Date(),
+  policy: ReferenceRetryPolicy = DEFAULT_REFERENCE_RETRY,
 ): WagerOutcome {
   if (tx.isTerminal()) {
     throw new InvalidTransactionStateError(`Transação ${tx.id} já está em ${tx.status}`);
@@ -62,7 +66,14 @@ export function applyWager(
   if (tx.referenceExternalTransactionId !== null) {
     if (reference === null || !reference.isTerminal()) {
       // chegou fora de ordem: a referência ainda não veio ou ainda não terminou
-      if (tx.status === 'PENDING') tx.markPendingReference(wallet.balance);
+      if (tx.status === 'PENDING') {
+        tx.markPendingReference(wallet.balance, nextReferenceCheck(at, 0, policy));
+        return { status: 'PENDING_REFERENCE' };
+      }
+      // já estava esperando: é mais uma tentativa do worker
+      const attempts = tx.referenceAttempts + 1;
+      if (attempts >= policy.maxAttempts) return reject('REFERENCE_NOT_FOUND');
+      tx.scheduleReferenceRetry(nextReferenceCheck(at, attempts, policy));
       return { status: 'PENDING_REFERENCE' };
     }
     if (

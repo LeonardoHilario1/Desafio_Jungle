@@ -33,7 +33,7 @@ async function executedNames(): Promise<string[]> {
 }
 
 const allNames = migrations.map((m) => m.name);
-const domainTables = ['outbox_messages', 'wager_transactions', 'wallet_ledger_entries', 'wallets'];
+const domainTables = ['inbox_messages', 'outbox_messages', 'wager_transactions', 'wallet_ledger_entries', 'wallets'];
 
 beforeAll(async () => {
   orm = await initTestOrm();

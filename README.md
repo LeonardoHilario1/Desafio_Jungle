@@ -1,7 +1,8 @@
 # Distributed Wagering Processor
 
 Serviço financeiro que recebe transações de apostas de provedores de jogos (BET, WIN,
-LOSS, REFUND e ROLLBACK), atualiza o saldo das carteiras e mantém um ledger imutável.
+LOSS, REFUND e ROLLBACK), por HTTP ou por fila SQS, atualiza o saldo das carteiras e mantém
+um ledger imutável.
 
 Ele continua correto quando as mensagens chegam **repetidas**, **fora de ordem** ou
 **ao mesmo tempo**, e com **várias instâncias** da aplicação rodando juntas.
@@ -19,6 +20,10 @@ Desenvolvido para o desafio técnico da Jungle Gaming.
 - **Ledger auditável:** todo movimento gera um lançamento com saldo antes e depois; o
   banco impede alterar ou apagar lançamentos.
 - **Eventos só depois do commit:** padrão outbox transacional publicando no SQS.
+- **Fila com inbox e DLQ:** consumidor da fila FIFO com deduplicação persistente, ack só
+  depois do commit, retry com backoff e dead-letter.
+- **Fora de ordem:** um REFUND que chega antes da aposta espera e é aplicado quando ela
+  chega.
 - **Testado de verdade:** PostgreSQL e LocalStack reais, com três instâncias disputando a
   mesma carteira.
 
@@ -40,7 +45,8 @@ curl localhost:3000/health/ready
 
 A subida segue esta ordem:
 
-1. `postgres` e `localstack` ficam saudáveis (o LocalStack cria a fila `wagering-events`).
+1. `postgres` e `localstack` ficam saudáveis (o LocalStack cria as filas
+   `wagering-events`, `wager-transactions.fifo` e `wager-transactions-dlq.fifo`).
 2. `migrate` aplica as migrations e termina.
 3. `app` sobe na porta 3000.
 
@@ -108,6 +114,30 @@ curl -s -X POST localhost:3000/wagering/transactions \
     "kind": "REFUND",
     "money": { "amount": "25.00", "currency": "BRL" },
     "referenceExternalTransactionId": "transaction-123"
+  }'
+```
+
+Enviar uma transação pela fila (o consumidor da aplicação processa sozinho):
+
+```bash
+docker compose exec localstack awslocal sqs send-message \
+  --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
+  --message-group-id <walletId> --message-deduplication-id msg-123 \
+  --message-body '{
+    "messageId": "msg-123",
+    "type": "WagerTransactionRequested",
+    "occurredAt": "2026-07-29T15:00:00.000Z",
+    "data": {
+      "providerId": "provider-a",
+      "externalTransactionId": "transaction-456",
+      "idempotencyKey": "provider-a:transaction-456",
+      "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+      "walletId": "<walletId>",
+      "roundId": "round-987",
+      "gameId": "fortune-chimp",
+      "kind": "BET",
+      "money": { "amount": "10.00", "currency": "BRL" }
+    }
   }'
 ```
 
@@ -205,6 +235,10 @@ O que é testado:
 - **Unidade:** `Money`, carteira, ledger e as regras de cada tipo de transação.
 - **Banco:** cada constraint e trigger do schema; migrations indo e voltando.
 - **API:** contrato, status HTTP, idempotência, REFUND e ROLLBACK.
+- **Fila:** inbox e reentrega, worker morto depois do commit e antes do ack, DLQ, retry
+  com backoff e três consumidores ao mesmo tempo.
+- **Fora de ordem:** pendências liberadas quando a referência chega, worker com limite de
+  tentativas.
 - **Concorrência:** três instâncias da aplicação ao mesmo tempo, incluindo o cenário do
   desafio (saldo 100.00 e duas apostas de 80.00 simultâneas: uma passa, a outra é
   recusada, saldo final 20.00).
@@ -246,6 +280,14 @@ bun run start
 | `SQS_OUTBOX_QUEUE_NAME` | sim | | fila dos eventos |
 | `OUTBOX_PUBLISHER_ENABLED` | não | `true` | liga o publisher da outbox nesta instância |
 | `OUTBOX_POLL_INTERVAL_MS` | não | `500` | intervalo entre buscas do publisher |
+| `DB_LOCK_TIMEOUT_MS` | não | `5000` | espera máxima pelo lock da carteira |
+| `SQS_INPUT_QUEUE_NAME`, `SQS_DLQ_NAME` | não | `wager-transactions.fifo`, `wager-transactions-dlq.fifo` | fila de entrada e DLQ |
+| `CONSUMER_ENABLED` | não | `true` | liga o consumidor da fila nesta instância |
+| `CONSUMER_MAX_ATTEMPTS` | não | `5` | tentativas com falha transitória antes da DLQ |
+| `CONSUMER_RETRY_BASE_SECONDS` | não | `2` | base do backoff entre tentativas |
+| `CONSUMER_WAIT_TIME_SECONDS` | não | `10` | long polling da fila |
+| `PENDING_REFERENCE_WORKER_ENABLED` | não | `true` | liga o worker de pendências nesta instância |
+| `PENDING_REFERENCE_MAX_ATTEMPTS` | não | `10` | tentativas antes de `REFERENCE_NOT_FOUND` |
 
 Se faltar uma variável obrigatória, a aplicação não sobe.
 
@@ -262,12 +304,12 @@ Postgres. Se o volume já existia, recrie com `docker compose down -v`.
 - outbox;
 - consultas de transação;
 - ledger paginado por cursor e reconciliação de saldo;
+- consumidor SQS com inbox, retry, DLQ e shutdown gracioso;
+- reprocessamento das transações que chegam antes da referência;
 - testes com várias instâncias.
 
 **Próximos passos:**
 
-- consumidor da fila `wager-transactions.fifo`, com inbox e DLQ;
-- reprocessamento automático das transações `PENDING_REFERENCE`;
 - logs estruturados e métricas.
 
 Autenticação ficou fora do escopo. O desenho previsto, com um Identity Provider externo,

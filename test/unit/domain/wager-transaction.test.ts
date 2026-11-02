@@ -84,7 +84,7 @@ describe('transições', () => {
 
   test('PENDING → PENDING_REFERENCE → PROCESSED, com vínculo à referência', () => {
     const tx = WagerTransaction.create(props({ kind: 'REFUND', referenceExternalTransactionId: 'bet-0' }));
-    tx.markPendingReference(brl('100'));
+    tx.markPendingReference(brl('100'), new Date());
     expect(tx.status).toBe('PENDING_REFERENCE');
     expect(tx.isTerminal()).toBe(false);
     tx.markProcessed('bet-id', brl('110'));
@@ -111,7 +111,7 @@ describe('transições', () => {
         markProcessed: () => tx.markProcessed('bet-id', brl('1')),
         reject: () => tx.reject('INSUFFICIENT_FUNDS', brl('1')),
         fail: () => tx.fail('PROCESSING_FAILED'),
-        markPendingReference: () => tx.markPendingReference(brl('1')),
+        markPendingReference: () => tx.markPendingReference(brl('1'), new Date()),
       }[method];
       expect(call).toThrow(InvalidTransactionStateError);
     },
@@ -122,7 +122,7 @@ describe('transições', () => {
     expect(() => withRef.markProcessed(null, brl('1'))).toThrow(InvalidTransactionStateError);
     const withoutRef = WagerTransaction.create(props());
     expect(() => withoutRef.markProcessed('x', brl('1'))).toThrow(InvalidTransactionStateError);
-    expect(() => withoutRef.markPendingReference(brl('1'))).toThrow(InvalidTransactionStateError);
+    expect(() => withoutRef.markPendingReference(brl('1'), new Date())).toThrow(InvalidTransactionStateError);
   });
 });
 
@@ -159,6 +159,8 @@ describe('consultas de domínio', () => {
       failureCode: original.failureCode,
       processedAt: original.processedAt,
       observedBalance: original.observedBalance,
+      referenceAttempts: original.referenceAttempts,
+      nextReferenceCheckAt: original.nextReferenceCheckAt,
     });
     expect(copy.status).toBe('REJECTED');
     expect(copy.failureCode).toBe('INSUFFICIENT_FUNDS');

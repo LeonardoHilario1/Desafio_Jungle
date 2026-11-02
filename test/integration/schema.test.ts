@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { ProcessWagerTransaction, type WagerTransactionCommand } from '../../src/aplicacao/processar-transacao-aposta';
 import { Money } from '../../src/dominio/dinheiro';
+import { DEFAULT_REFERENCE_RETRY } from '../../src/dominio/politica-referencia';
 import { Wallet } from '../../src/dominio/carteira';
 import { MikroOrmWageringUnitOfWork } from '../../src/persistencia/repositorio-apostas-mikro-orm';
 import { expectSqlState, initTestOrm, resetDatabase } from '../support/database';
@@ -19,7 +20,7 @@ let processWager: ProcessWagerTransaction;
 beforeAll(async () => {
   orm = await initTestOrm();
   uow = new MikroOrmWageringUnitOfWork(orm);
-  processWager = new ProcessWagerTransaction(uow);
+  processWager = new ProcessWagerTransaction(uow, DEFAULT_REFERENCE_RETRY);
 });
 
 beforeEach(async () => {

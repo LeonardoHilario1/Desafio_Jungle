@@ -3,6 +3,7 @@ import type { OpenedWallet, Wallet } from '../dominio/carteira';
 import type { WagerTransaction } from '../dominio/transacao-aposta';
 import type { WalletLedgerEntry } from '../dominio/lancamento-ledger';
 import type { Money } from '../dominio/dinheiro';
+import type { InboxMessage } from '../dominio/mensagem-inbox';
 
 /** tudo que uma transação de aposta gera e tem que ir no mesmo commit */
 export interface WagerChanges {
@@ -33,6 +34,12 @@ export interface WageringStore {
    * null se a carteira não existe
    */
   ledgerSnapshot(walletId: string): Promise<{ stored: Money; calculated: Money; entries: number } | null>;
+  /** PENDING_REFERENCE da carteira esperando por (providerId, externalTransactionId) */
+  findPendingDependents(walletId: string, providerId: string, externalTransactionId: string): Promise<WagerTransaction[]>;
+  /** pendências com checagem vencida, sem lock (o worker trava a carteira depois) */
+  findDueReferenceChecks(now: Date, limit: number): Promise<{ id: string; walletId: string }[]>;
+  findInbox(consumerName: string, messageId: string): Promise<{ message: InboxMessage; transactionId: string } | null>;
+  insertInbox(message: InboxMessage, transactionId: string): Promise<void>;
   insertWallet(opened: OpenedWallet, events: IntegrationEvent<unknown>[]): Promise<void>;
   /** grava a transação (nova ou atualizada), o saldo, o lançamento e os eventos da outbox */
   saveWager(changes: WagerChanges): Promise<void>;
@@ -58,6 +65,14 @@ export class DuplicateTransactionError extends Error {
   constructor(readonly key: 'IDEMPOTENCY_KEY' | 'EXTERNAL_ID') {
     super(`Transação duplicada (${key})`);
     this.name = 'DuplicateTransactionError';
+  }
+}
+
+/** a mesma mensagem foi gravada na inbox por outro consumidor no mesmo instante */
+export class DuplicateInboxError extends Error {
+  constructor() {
+    super('Mensagem duplicada na inbox');
+    this.name = 'DuplicateInboxError';
   }
 }
 

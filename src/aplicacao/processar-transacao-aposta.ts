@@ -1,11 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { EventContext } from '../dominio/eventos/evento-integracao';
-import { eventsFor } from '../dominio/eventos/eventos-apostas';
 import { Money, type MoneyProps } from '../dominio/dinheiro';
-import { applyWager } from '../dominio/regras-aposta';
+import { InboxMessage } from '../dominio/mensagem-inbox';
+import type { ReferenceRetryPolicy } from '../dominio/politica-referencia';
 import { WagerTransaction, type SubmittableKind } from '../dominio/transacao-aposta';
 import { ApplicationError } from './erro-aplicacao';
+import { REFERENCE_RETRY_POLICY, settle } from './liquidacao';
 import {
+  DuplicateInboxError,
   DuplicateTransactionError,
   LockTimeoutError,
   WAGERING_UNIT_OF_WORK,
@@ -31,6 +33,16 @@ export interface WagerResult {
   transaction: WagerTransaction;
   /** true quando a Idempotency-Key já existia e eu só devolvi o que estava gravado */
   idempotentReplay: boolean;
+  /** true quando a própria mensagem da fila já estava na inbox (reentrega) */
+  duplicateMessage?: boolean;
+}
+
+/** dados da mensagem da fila que entram na inbox junto com o efeito */
+export interface InboxReceipt {
+  consumerName: string;
+  messageId: string;
+  payloadHash: string;
+  receivedAt: Date;
 }
 
 /**
@@ -44,21 +56,31 @@ export interface WagerResult {
  *    (mesmo payloadHash) ou conflito.
  * 3. resolvo a referência por (providerId, referenceExternalTransactionId), passo pelas
  *    regras (applyWager) e gravo transação, saldo, lançamento e eventos no mesmo commit.
+ *    se a transação terminou, as PENDING_REFERENCE que esperavam por ela são liberadas
+ *    no mesmo commit (ver settle).
+ * 4. vindo da fila, a linha da inbox entra nesse mesmo commit: ou fica tudo, ou nada.
  *
  * obs: a mesma chave em paralelo pra carteiras diferentes o lock não pega. aí quem segura
  * é o UNIQUE do banco, e eu decido a resposta relendo quem ganhou.
  */
 @Injectable()
 export class ProcessWagerTransaction {
-  constructor(@Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork) {}
+  constructor(
+    @Inject(WAGERING_UNIT_OF_WORK) private readonly uow: WageringUnitOfWork,
+    @Inject(REFERENCE_RETRY_POLICY) private readonly policy: ReferenceRetryPolicy,
+  ) {}
 
-  async execute(command: WagerTransactionCommand, ctx: EventContext): Promise<WagerResult> {
+  async execute(command: WagerTransactionCommand, ctx: EventContext, inbox?: InboxReceipt): Promise<WagerResult> {
     // valido a forma e calculo o payloadHash antes de abrir transação
     const candidate = WagerTransaction.create({ ...command, money: Money.from(command.money), correlationId: ctx.correlationId });
 
     try {
-      return await this.uow.run((store) => this.process(store, candidate, ctx));
+      return await this.uow.run((store) => this.process(store, candidate, ctx, inbox));
     } catch (error) {
+      if (error instanceof DuplicateInboxError && inbox) {
+        // outro consumidor gravou a mesma mensagem no mesmo instante; o efeito é o dele
+        return this.uow.read((store) => resolveInbox(store, inbox)).then((r) => r!);
+      }
       if (error instanceof DuplicateTransactionError) {
         return this.uow.read((store) => resolveDuplicate(store, candidate));
       }
@@ -69,34 +91,47 @@ export class ProcessWagerTransaction {
     }
   }
 
-  private async process(store: WageringStore, candidate: WagerTransaction, ctx: EventContext): Promise<WagerResult> {
+  private async process(
+    store: WageringStore,
+    candidate: WagerTransaction,
+    ctx: EventContext,
+    inbox: InboxReceipt | undefined,
+  ): Promise<WagerResult> {
     const wallet = await store.lockWallet(candidate.walletId);
     if (!wallet) {
       throw new ApplicationError('WALLET_NOT_FOUND', `Carteira ${candidate.walletId} não encontrada`);
     }
 
+    if (inbox) {
+      const delivered = await resolveInbox(store, inbox);
+      if (delivered) return delivered;
+    }
+
     const duplicate = await resolveDuplicate(store, candidate, { allowMissing: true });
-    if (duplicate) return duplicate;
+    const result = duplicate ?? { transaction: candidate, idempotentReplay: false };
+    if (!duplicate) await settle(store, wallet, candidate, ctx, this.policy);
 
-    const reference =
-      candidate.referenceExternalTransactionId === null
-        ? null
-        : await store.findByExternalId(candidate.providerId, candidate.referenceExternalTransactionId);
-    // a referência só é confiável sob o lock se for da mesma carteira. se for de outra,
-    // applyWager rejeita antes de olhar o estado dela
-    const referenceAlreadyReversed =
-      reference !== null && candidate.isReversal() && (await store.hasProcessedReversal(reference.id));
-
-    const outcome = applyWager(wallet, candidate, { reference, referenceAlreadyReversed });
-    const entry = outcome.status === 'PROCESSED' ? outcome.entry : null;
-    await store.saveWager({
-      wallet,
-      transaction: candidate,
-      entry,
-      events: eventsFor(candidate, wallet, entry, ctx),
-    });
-    return { transaction: candidate, idempotentReplay: false };
+    if (inbox) {
+      // marco a mensagem como tratada no mesmo commit, inclusive quando foi replay pela
+      // Idempotency-Key (mensagem nova, operação repetida)
+      const message = InboxMessage.receive(inbox);
+      message.markProcessed();
+      await store.insertInbox(message, result.transaction.id);
+    }
+    return result;
   }
+}
+
+/** mensagem já tratada: devolve o resultado gravado; mesmo id com outro conteúdo é conflito */
+async function resolveInbox(store: WageringStore, inbox: InboxReceipt): Promise<WagerResult | null> {
+  const found = await store.findInbox(inbox.consumerName, inbox.messageId);
+  if (!found) return null;
+  if (!found.message.matchesPayload(inbox.payloadHash)) {
+    throw new ApplicationError('MESSAGE_ID_CONFLICT', `messageId ${inbox.messageId} já recebido com outro conteúdo`);
+  }
+  const transaction = await store.findTransaction(found.transactionId);
+  if (!transaction) throw new Error(`Inbox aponta para transação inexistente ${found.transactionId}`);
+  return { transaction, idempotentReplay: true, duplicateMessage: true };
 }
 
 /**

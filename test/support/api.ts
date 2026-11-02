@@ -1,6 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { createApp } from '../../src/aplicacao';
+import type { AppConfig } from '../../src/configuracao';
 import { testConfig } from './test-config';
 
 export interface ApiResponse<T = any> {
@@ -18,8 +19,8 @@ export interface TestApi {
 }
 
 /** Sobe a aplicação real (Nest + MikroORM + PostgreSQL de teste) numa porta livre. */
-export async function startApi(): Promise<TestApi> {
-  const app = await createApp(testConfig());
+export async function startApi(configure: (config: AppConfig) => AppConfig = (c) => c): Promise<TestApi> {
+  const app = await createApp(configure(testConfig()));
   await app.listen(0, '127.0.0.1');
   const url = (await app.getUrl()).replace('[::1]', '127.0.0.1');
 

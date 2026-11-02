@@ -12,6 +12,8 @@ x-app-env: &app-env
   AWS_SECRET_ACCESS_KEY: test
   SQS_ENDPOINT: http://localstack:4566
   SQS_OUTBOX_QUEUE_NAME: wagering-events
+  SQS_INPUT_QUEUE_NAME: wager-transactions.fifo
+  SQS_DLQ_NAME: wager-transactions-dlq.fifo
 
 services:
   postgres:
@@ -27,7 +29,9 @@ services:
       # Cria o banco wagering_test, usado pelos testes de integração.
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      # por TCP de propósito: durante os scripts de init o Postgres sobe um servidor
+      # temporário só no socket Unix, e o pg_isready sem -h diria "pronto" cedo demais
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U wagering -d wagering"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -42,7 +46,7 @@ services:
     volumes:
       - ./docker/localstack/init/ready.d:/etc/localstack/init/ready.d:ro
     healthcheck:
-      test: ["CMD", "awslocal", "sqs", "get-queue-url", "--queue-name", "wagering-events"]
+      test: ["CMD", "awslocal", "sqs", "get-queue-url", "--queue-name", "wager-transactions.fifo"]
       interval: 3s
       timeout: 5s
       retries: 30
@@ -57,6 +61,9 @@ services:
 
   app:
     build: .
+    # init de verdade como PID 1: repassa o SIGTERM pro Bun e recolhe o processo; sem isso
+    # o shutdown gracioso roda, mas o container sai com 137
+    init: true
     environment: *app-env
     ports:
       - "3000:3000"

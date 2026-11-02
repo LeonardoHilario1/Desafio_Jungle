@@ -4,6 +4,8 @@ export interface DatabaseConfig {
   user: string;
   password: string;
   name: string;
+  /** quanto tempo uma operação espera o lock da carteira antes de desistir (WALLET_BUSY) */
+  lockTimeoutMs: number;
 }
 
 export interface SqsConfig {
@@ -12,6 +14,34 @@ export interface SqsConfig {
   accessKeyId: string;
   secretAccessKey: string;
   outboxQueueName: string;
+  /** fila FIFO de entrada das transações */
+  inputQueueName: string;
+  /** dead-letter da fila de entrada */
+  dlqName: string;
+}
+
+export interface ConsumerConfig {
+  /** liga o consumidor da fila de entrada nesta instância */
+  enabled: boolean;
+  /** nome que identifica o consumidor na inbox */
+  name: string;
+  /** recebimentos com falha transitória antes de mandar pra DLQ */
+  maxAttempts: number;
+  /** base do backoff entre tentativas, em segundos (2^tentativa * base, até 300 s) */
+  retryBaseSeconds: number;
+  /** long polling do ReceiveMessage, de 0 a 20 s */
+  waitTimeSeconds: number;
+  /** quanto tempo o shutdown espera as mensagens em andamento */
+  shutdownTimeoutMs: number;
+}
+
+export interface PendingReferenceConfig {
+  /** liga o worker que reprocessa PENDING_REFERENCE nesta instância */
+  workerEnabled: boolean;
+  pollIntervalMs: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  maxAttempts: number;
 }
 
 export interface OutboxConfig {
@@ -25,6 +55,8 @@ export interface AppConfig {
   db: DatabaseConfig;
   sqs: SqsConfig;
   outbox: OutboxConfig;
+  consumer: ConsumerConfig;
+  pendingReference: PendingReferenceConfig;
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
@@ -67,6 +99,21 @@ function optionalPositiveInt(env: Env, name: string, fallback: number): number {
   return value;
 }
 
+function optionalIntInRange(env: Env, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`Variável de ambiente ${name} deve ser inteiro de ${min} a ${max}: ${raw}`);
+  }
+  return value;
+}
+
+function optional(env: Env, name: string, fallback: string): string {
+  const raw = env[name];
+  return raw === undefined || raw.trim() === '' ? fallback : raw;
+}
+
 export function loadDatabaseConfig(env: Env = process.env): DatabaseConfig {
   return {
     host: required(env, 'DB_HOST'),
@@ -74,6 +121,7 @@ export function loadDatabaseConfig(env: Env = process.env): DatabaseConfig {
     user: required(env, 'DB_USER'),
     password: required(env, 'DB_PASSWORD'),
     name: required(env, 'DB_NAME'),
+    lockTimeoutMs: optionalPositiveInt(env, 'DB_LOCK_TIMEOUT_MS', 5000),
   };
 }
 
@@ -87,10 +135,27 @@ export function loadConfig(env: Env = process.env): AppConfig {
       accessKeyId: required(env, 'AWS_ACCESS_KEY_ID'),
       secretAccessKey: required(env, 'AWS_SECRET_ACCESS_KEY'),
       outboxQueueName: required(env, 'SQS_OUTBOX_QUEUE_NAME'),
+      inputQueueName: optional(env, 'SQS_INPUT_QUEUE_NAME', 'wager-transactions.fifo'),
+      dlqName: optional(env, 'SQS_DLQ_NAME', 'wager-transactions-dlq.fifo'),
     },
     outbox: {
       publisherEnabled: optionalBoolean(env, 'OUTBOX_PUBLISHER_ENABLED', true),
       pollIntervalMs: optionalPositiveInt(env, 'OUTBOX_POLL_INTERVAL_MS', 500),
+    },
+    consumer: {
+      enabled: optionalBoolean(env, 'CONSUMER_ENABLED', true),
+      name: optional(env, 'CONSUMER_NAME', 'wager-transactions-consumer'),
+      maxAttempts: optionalPositiveInt(env, 'CONSUMER_MAX_ATTEMPTS', 5),
+      retryBaseSeconds: optionalIntInRange(env, 'CONSUMER_RETRY_BASE_SECONDS', 2, 0, 300),
+      waitTimeSeconds: optionalIntInRange(env, 'CONSUMER_WAIT_TIME_SECONDS', 10, 0, 20),
+      shutdownTimeoutMs: optionalPositiveInt(env, 'CONSUMER_SHUTDOWN_TIMEOUT_MS', 10_000),
+    },
+    pendingReference: {
+      workerEnabled: optionalBoolean(env, 'PENDING_REFERENCE_WORKER_ENABLED', true),
+      pollIntervalMs: optionalPositiveInt(env, 'PENDING_REFERENCE_POLL_INTERVAL_MS', 1000),
+      baseDelayMs: optionalPositiveInt(env, 'PENDING_REFERENCE_BASE_DELAY_MS', 1000),
+      maxDelayMs: optionalPositiveInt(env, 'PENDING_REFERENCE_MAX_DELAY_MS', 60_000),
+      maxAttempts: optionalPositiveInt(env, 'PENDING_REFERENCE_MAX_ATTEMPTS', 10),
     },
   };
 }

@@ -8,6 +8,12 @@ import { OpenWallet } from './aplicacao/abrir-carteira';
 import { ProcessWagerTransaction } from './aplicacao/processar-transacao-aposta';
 import { WageringQueries } from './aplicacao/consultas-apostas';
 import { WAGERING_UNIT_OF_WORK } from './aplicacao/repositorio-apostas';
+import { REFERENCE_RETRY_POLICY } from './aplicacao/liquidacao';
+import { RecordPermanentFailure } from './aplicacao/registrar-falha';
+import { RetryPendingReferences } from './aplicacao/reprocessar-pendencias';
+import { WagerTransactionConsumer } from './fila/consumidor-transacoes';
+import { ConsumerWorker } from './fila/worker-consumidor';
+import { PendingReferenceWorker } from './pendencias/worker-pendencias';
 import { APP_CONFIG, type AppConfig } from './configuracao';
 import { HealthController } from './saude/controlador-saude';
 import { ReadinessService } from './saude/verificacao-prontidao';
@@ -44,13 +50,31 @@ export class AppModule {
         // porta de persistência dos casos de uso, implementada com MikroORM
         {
           provide: WAGERING_UNIT_OF_WORK,
-          useFactory: (orm: MikroORM) => new MikroOrmWageringUnitOfWork(orm),
+          useFactory: (orm: MikroORM) => new MikroOrmWageringUnitOfWork(orm, config.db.lockTimeoutMs),
           inject: [MikroORM],
+        },
+        {
+          provide: REFERENCE_RETRY_POLICY,
+          useValue: {
+            baseDelayMs: config.pendingReference.baseDelayMs,
+            maxDelayMs: config.pendingReference.maxDelayMs,
+            maxAttempts: config.pendingReference.maxAttempts,
+          },
         },
         ReadinessService,
         OpenWallet,
         ProcessWagerTransaction,
         WageringQueries,
+        RecordPermanentFailure,
+        RetryPendingReferences,
+        {
+          provide: WagerTransactionConsumer,
+          useFactory: (process: ProcessWagerTransaction, failure: RecordPermanentFailure, sqs: SQSClient) =>
+            new WagerTransactionConsumer(process, failure, sqs, config.sqs, config.consumer),
+          inject: [ProcessWagerTransaction, RecordPermanentFailure, SQSClient],
+        },
+        ConsumerWorker,
+        PendingReferenceWorker,
         {
           provide: OutboxPublisher,
           useFactory: (orm: MikroORM, sqs: SQSClient) => new OutboxPublisher(orm, sqs, config.sqs.outboxQueueName),

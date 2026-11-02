@@ -63,6 +63,8 @@ export class WagerTransactionRecord {
   observedCurrency!: string | null;
   createdAt!: Date;
   processedAt!: Date | null;
+  referenceAttempts!: number;
+  nextReferenceCheckAt!: Date | null;
 }
 
 export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
@@ -90,6 +92,8 @@ export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
     observedCurrency: { type: 'string', columnType: 'char(3)', fieldName: 'observed_currency', nullable: true },
     createdAt: { ...timestamptz, fieldName: 'created_at' },
     processedAt: { ...timestamptz, fieldName: 'processed_at', nullable: true },
+    referenceAttempts: { type: 'integer', columnType: 'integer', fieldName: 'reference_attempts' },
+    nextReferenceCheckAt: { ...timestamptz, fieldName: 'next_reference_check_at', nullable: true },
   },
 });
 
@@ -153,4 +157,32 @@ export const OutboxMessageSchema = new EntitySchema<OutboxMessageRecord>({
   },
 });
 
-export const entitySchemas = [WalletSchema, WagerTransactionSchema, LedgerEntrySchema, OutboxMessageSchema];
+export class InboxMessageRecord {
+  consumerName!: string;
+  messageId!: string;
+  payloadHash!: string;
+  transactionId!: string;
+  receivedAt!: Date;
+  processedAt!: Date;
+}
+
+export const InboxMessageSchema = new EntitySchema<InboxMessageRecord>({
+  class: InboxMessageRecord,
+  tableName: 'inbox_messages',
+  properties: {
+    consumerName: { type: 'string', columnType: 'varchar(64)', fieldName: 'consumer_name', primary: true },
+    messageId: { ...text255, fieldName: 'message_id', primary: true },
+    payloadHash: { type: 'string', columnType: 'char(64)', fieldName: 'payload_hash' },
+    transactionId: { type: 'uuid', columnType: 'uuid', fieldName: 'transaction_id' },
+    receivedAt: { ...timestamptz, fieldName: 'received_at' },
+    processedAt: { ...timestamptz, fieldName: 'processed_at' },
+  },
+});
+
+export const entitySchemas = [
+  WalletSchema,
+  WagerTransactionSchema,
+  LedgerEntrySchema,
+  OutboxMessageSchema,
+  InboxMessageSchema,
+];

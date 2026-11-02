@@ -4,7 +4,9 @@ import { OutboxMessage } from '../dominio/mensagem-outbox';
 import { WagerTransaction } from '../dominio/transacao-aposta';
 import { Wallet } from '../dominio/carteira';
 import { WalletLedgerEntry, type LedgerDirection } from '../dominio/lancamento-ledger';
+import { InboxMessage } from '../dominio/mensagem-inbox';
 import {
+  InboxMessageRecord,
   LedgerEntryRecord,
   OutboxMessageRecord,
   WagerTransactionRecord,
@@ -67,6 +69,8 @@ export function transactionFromRecord(r: WagerTransactionRecord): WagerTransacti
     processedAt: r.processedAt,
     observedBalance:
       r.observedBalance === null || r.observedCurrency === null ? null : money(r.observedBalance, r.observedCurrency),
+    referenceAttempts: r.referenceAttempts,
+    nextReferenceCheckAt: r.nextReferenceCheckAt,
   });
 }
 
@@ -96,6 +100,8 @@ export function writeTransaction(
   r.observedCurrency = t.observedBalance?.currency ?? null;
   r.createdAt = t.createdAt;
   r.processedAt = t.processedAt;
+  r.referenceAttempts = t.referenceAttempts;
+  r.nextReferenceCheckAt = t.nextReferenceCheckAt;
   return r;
 }
 
@@ -150,5 +156,27 @@ export function writeOutboxMessage(m: OutboxMessage, r: OutboxMessageRecord = ne
   r.attempts = m.attempts;
   r.nextAttemptAt = m.nextAttemptAt;
   r.publishedAt = m.publishedAt;
+  return r;
+}
+
+export function inboxFromRecord(r: InboxMessageRecord): InboxMessage {
+  return InboxMessage.rehydrate({
+    messageId: r.messageId,
+    consumerName: r.consumerName,
+    payloadHash: r.payloadHash,
+    receivedAt: r.receivedAt,
+    processedAt: r.processedAt,
+  });
+}
+
+export function writeInboxMessage(m: InboxMessage, transactionId: string): InboxMessageRecord {
+  if (m.processedAt === null) throw new Error(`Mensagem ${m.messageId} gravada sem estar processada`);
+  const r = new InboxMessageRecord();
+  r.consumerName = m.consumerName;
+  r.messageId = m.messageId;
+  r.payloadHash = m.payloadHash;
+  r.transactionId = transactionId;
+  r.receivedAt = m.receivedAt;
+  r.processedAt = m.processedAt;
   return r;
 }

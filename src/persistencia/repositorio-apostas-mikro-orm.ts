@@ -1,6 +1,7 @@
 import { LockMode } from '@mikro-orm/core';
 import type { EntityManager, MikroORM } from '@mikro-orm/postgresql';
 import {
+  DuplicateInboxError,
   DuplicateTransactionError,
   DuplicateWalletError,
   LockTimeoutError,
@@ -15,28 +16,33 @@ import type { OpenedWallet, Wallet } from '../dominio/carteira';
 import { isLockTimeout, isUniqueViolation } from './erros-banco';
 import { Money } from '../dominio/dinheiro';
 import type { WalletLedgerEntry } from '../dominio/lancamento-ledger';
-import { LedgerEntryRecord, WagerTransactionRecord, WalletRecord } from './esquemas-entidades';
+import type { InboxMessage } from '../dominio/mensagem-inbox';
+import { InboxMessageRecord, LedgerEntryRecord, WagerTransactionRecord, WalletRecord } from './esquemas-entidades';
 import {
+  inboxFromRecord,
   ledgerEntryFromRecord,
   transactionFromRecord,
   walletFromRecord,
   writeLedgerEntry,
   writeOutboxMessage,
+  writeInboxMessage,
   writeTransaction,
   writeWallet,
 } from './mapeadores';
 
-// quanto tempo espero o lock de uma carteira antes de desistir (WALLET_BUSY)
-const LOCK_TIMEOUT = '5s';
 
 /** implementação da porta com MikroORM: uma transação SQL por run, em READ COMMITTED */
 export class MikroOrmWageringUnitOfWork implements WageringUnitOfWork {
-  constructor(private readonly orm: MikroORM) {}
+  /** lockTimeoutMs: quanto tempo espero o lock de uma carteira antes de desistir (WALLET_BUSY) */
+  constructor(
+    private readonly orm: MikroORM,
+    private readonly lockTimeoutMs = 5000,
+  ) {}
 
   async run<T>(fn: (store: WageringStore) => Promise<T>): Promise<T> {
     try {
       return await this.orm.em.fork().transactional(async (em) => {
-        await em.execute(`set local lock_timeout = '${LOCK_TIMEOUT}'`);
+        await em.execute(`set local lock_timeout = '${Math.trunc(this.lockTimeoutMs)}ms'`);
         return fn(new MikroOrmWageringStore(em));
       });
     } catch (error) {
@@ -57,6 +63,7 @@ function translate(error: unknown): unknown {
     return new DuplicateTransactionError('EXTERNAL_ID');
   }
   if (isUniqueViolation(error, 'wallets_player_currency_uq')) return new DuplicateWalletError();
+  if (isUniqueViolation(error, 'inbox_messages_pk')) return new DuplicateInboxError();
   if (isLockTimeout(error)) return new LockTimeoutError();
   return error;
 }
@@ -143,6 +150,33 @@ class MikroOrmWageringStore implements WageringStore {
       ? Money.zero(row.currency).subtract(money(row.calculated.slice(1)))
       : money(row.calculated);
     return { stored: money(row.balance), calculated, entries: row.entries };
+  }
+
+  async findPendingDependents(walletId: string, providerId: string, externalTransactionId: string) {
+    const records = await this.em.find(
+      WagerTransactionRecord,
+      { walletId, providerId, referenceExternalTransactionId: externalTransactionId, status: 'PENDING_REFERENCE' },
+      { orderBy: { createdAt: 'asc', id: 'asc' } },
+    );
+    return records.map((r) => this.trackTransaction(r)!);
+  }
+
+  async findDueReferenceChecks(now: Date, limit: number) {
+    const records = await this.em.find(
+      WagerTransactionRecord,
+      { status: 'PENDING_REFERENCE', nextReferenceCheckAt: { $lte: now } },
+      { orderBy: { nextReferenceCheckAt: 'asc' }, limit, fields: ['id', 'walletId'] },
+    );
+    return records.map((r) => ({ id: r.id, walletId: r.walletId }));
+  }
+
+  async findInbox(consumerName: string, messageId: string) {
+    const record = await this.em.findOne(InboxMessageRecord, { consumerName, messageId });
+    return record ? { message: inboxFromRecord(record), transactionId: record.transactionId } : null;
+  }
+
+  async insertInbox(message: InboxMessage, transactionId: string): Promise<void> {
+    await this.em.persist(writeInboxMessage(message, transactionId)).flush();
   }
 
   async insertWallet(opened: OpenedWallet, events: IntegrationEvent<unknown>[]): Promise<void> {

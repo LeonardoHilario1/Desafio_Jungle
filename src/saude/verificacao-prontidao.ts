@@ -36,9 +36,13 @@ export class ReadinessService {
 
   private async checkQueue(): Promise<CheckResult> {
     try {
-      await this.sqs.send(new GetQueueUrlCommand({ QueueName: this.config.sqs.outboxQueueName }), {
-        abortSignal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-      });
+      // a fila de eventos sempre; a de entrada e a DLQ só se o consumidor estiver ligado aqui
+      const queues = [this.config.sqs.outboxQueueName];
+      if (this.config.consumer.enabled) queues.push(this.config.sqs.inputQueueName, this.config.sqs.dlqName);
+      const signal = AbortSignal.timeout(CHECK_TIMEOUT_MS);
+      await Promise.all(
+        queues.map((QueueName) => this.sqs.send(new GetQueueUrlCommand({ QueueName }), { abortSignal: signal })),
+      );
       return { status: 'up' };
     } catch (error) {
       return { status: 'down', reason: describe(error) };

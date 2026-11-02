@@ -16,17 +16,22 @@ do desafio. Setup e comandos estão no [README.md](README.md).
 8. [Schema e garantias no banco](#schema-e-garantias-no-banco)
 9. [API](#api)
 10. [Eventos e outbox](#eventos-e-outbox)
-11. [Infraestrutura e operação](#infraestrutura-e-operação)
-12. [Testes](#testes)
-13. [Autenticação (desenho, não implementado)](#autenticação-desenho-não-implementado)
-14. [Trade-offs](#trade-offs)
-15. [Limitações e pendências](#limitações-e-pendências)
-16. [Quem decidiu o quê](#quem-decidiu-o-quê)
+11. [Processamento por SQS](#processamento-por-sqs)
+12. [Referências fora de ordem](#referências-fora-de-ordem)
+13. [Infraestrutura e operação](#infraestrutura-e-operação)
+14. [Testes](#testes)
+15. [Autenticação (desenho, não implementado)](#autenticação-desenho-não-implementado)
+16. [Trade-offs](#trade-offs)
+17. [Limitações e pendências](#limitações-e-pendências)
+18. [Quem decidiu o quê](#quem-decidiu-o-quê)
 
 ## Visão geral
 
 ```
-provedor ──HTTP──▶ NestJS (N instâncias) ──▶ ProcessWagerTransaction (caso de uso)
+provedor ──HTTP──▶ NestJS (N instâncias) ──┐
+provedor ──SQS wager-transactions.fifo ──▶ consumidor (inbox) ──┤
+                                                                ▼
+                                            ProcessWagerTransaction (caso de uso)
                                                │ uma transação SQL:
                                                │ lock da carteira → idempotência → referência →
                                                │ regras → transação + saldo + ledger + outbox
@@ -55,6 +60,8 @@ Os nomes de pastas e arquivos em `src` estão em português. Os identificadores 
 | `src/migracoes` | migrations SQL versionadas e reversíveis |
 | `src/carteiras`, `src/apostas` | controllers e presenters HTTP |
 | `src/outbox` | publisher e worker |
+| `src/fila` | consumidor da fila de entrada (inbox, retry, DLQ) e o worker dele |
+| `src/pendencias` | worker que reprocessa `PENDING_REFERENCE` |
 | `src/api`, `src/autenticacao`, `src/saude` | validação de entrada e filtro de erros, guard de autenticação, health checks |
 
 ## Conformidade com as restrições invioláveis
@@ -209,19 +216,19 @@ A coluna "provedor" diz o que fazer.
 | `REVERSAL_INSUFFICIENT_FUNDS` | ROLLBACK de crédito que deixaria saldo negativo | escalar para operação (o crédito já foi consumido) |
 | `CURRENCY_MISMATCH` | moeda diferente da carteira | corrigir o payload (nova chave) |
 | `PLAYER_MISMATCH` | `playerId` diferente do dono da carteira | corrigir o payload |
-| `REFERENCE_NOT_FOUND` | referência não chegou dentro do limite (Etapa 10) | conferir o id da referência |
+| `REFERENCE_NOT_FOUND` | referência não chegou dentro do limite de tentativas | conferir o id da referência |
 | `REFERENCE_KIND_NOT_ALLOWED` | tipo de referência inválido para o kind | corrigir o payload |
 | `REFERENCE_NOT_PROCESSED` | referência terminou REJECTED/FAILED | desistir |
 | `REFERENCE_MISMATCH` | referência de outro jogador, carteira, moeda ou rodada | corrigir o payload |
 | `REFERENCE_AMOUNT_MISMATCH` | valor da reversão diferente do da referência | corrigir o payload |
 | `REFERENCE_ALREADY_REVERSED` | referência já revertida | desistir; já foi feito |
 
-`FAILED` usa `PROCESSING_FAILED` (`PERMANENT_FAILURE_CODES`), reservado para o consumidor
-da fila (Etapa 10).
+`FAILED` usa `PROCESSING_FAILED` (`PERMANENT_FAILURE_CODES`): mensagem da fila que esgotou
+as tentativas por falha de infraestrutura (ver [Processamento por SQS](#processamento-por-sqs)).
 
 ## Concorrência e idempotência
 
-`ProcessWagerTransaction` (usado pela API e, na Etapa 10, pelo consumidor da fila) roda
+`ProcessWagerTransaction` (usado pela API e pelo consumidor da fila) roda
 em uma única transação SQL (`READ COMMITTED`):
 
 1. `SET LOCAL lock_timeout = '5s'`.
@@ -232,7 +239,8 @@ em uma única transação SQL (`READ COMMITTED`):
    visível: mesmo `payloadHash` é replay; outro é 409. Mesmo
    `(providerId, externalTransactionId)` com outra chave também é 409.
 4. Resolve a referência, aplica `applyWager` e grava transação, saldo, lançamento e
-   eventos. Commit.
+   eventos. Se a transação terminou, libera as `PENDING_REFERENCE` da mesma carteira que
+   esperavam por ela (mesmo commit). Vindo da fila, grava também a linha da inbox. Commit.
 
 **Por que pessimista:** a operação é curta e sempre toca uma linha de carteira; o lock
 evita retry por conflito, não tem deadlock (uma linha por transação) e torna trivial
@@ -267,6 +275,7 @@ Migrations SQL escritas à mão, todas com `down`:
 | `Migration20261102000000_carteiras_e_transacoes` | carteiras e transações, constraints e trigger de imutabilidade |
 | `Migration20261102010000_ledger` | ledger, aritmética, triggers |
 | `Migration20261102020000_outbox` | outbox |
+| `Migration20261102030000_inbox_e_pendencias` | inbox do consumidor; tentativas e próxima checagem das `PENDING_REFERENCE` |
 
 > As migrations do domínio foram **consolidadas na Etapa 8**: o schema mudou por inteiro
 > para o contrato do desafio e nada tinha sido publicado. Um volume local criado antes
@@ -289,6 +298,8 @@ Migrations SQL escritas à mão, todas com `down`:
 | Coerência de estado | `CHECK`s: `failure_code` ⇔ REJECTED/FAILED; `processed_at` ⇔ terminal; saldo observado presente fora de PENDING/FAILED; PENDING_REFERENCE só com referência; vínculo ⇔ PROCESSED com referência |
 | Ledger imutável | trigger bloqueia `UPDATE`, `DELETE` e `TRUNCATE` |
 | Transação imutável | trigger bloqueia exclusão, mudança de campos de negócio, mudança após estado terminal e volta a PENDING |
+| Mensagem da fila tratada uma vez | PK `(consumer_name, message_id)` na inbox, gravada no mesmo commit do efeito; inbox append-only (trigger) |
+| Pendência sempre agendada | `CHECK ((status = 'PENDING_REFERENCE') = (next_reference_check_at IS NOT NULL))` |
 | Outbox imutável | trigger permite mudar só o controle de publicação; `published_at` não volta; `CHECK` amarra `id`/`event_type` ao envelope |
 
 - **Erros dos triggers:** SQLSTATE `P0001` com `hint` estável (`LEDGER_IMMUTABLE`,
@@ -377,10 +388,71 @@ O mapeamento é o mesmo em todos os endpoints:
 - **At-least-once:** queda entre o envio e o commit reenvia a mensagem; o `eventId` é o
   mesmo.
 
+## Processamento por SQS
+
+- **Filas:** `wager-transactions.fifo` (entrada) e `wager-transactions-dlq.fifo`, criadas
+  pelo script de init do LocalStack, com `RedrivePolicy` (`maxReceiveCount` 10) como rede
+  de segurança. O produtor deve usar `MessageGroupId = walletId`: o FIFO ordena por grupo,
+  o que evita trabalho fora de ordem na mesma carteira, mas **não é a garantia**: o banco
+  continua responsável pelas invariantes.
+- **Mensagem:** `{ messageId, type: "WagerTransactionRequested", occurredAt, data }`, com
+  `data` igual ao corpo HTTP mais `idempotencyKey`. Validada no consumidor
+  (`parseMessage`).
+- **Mesmo caso de uso da API:** o consumidor chama `ProcessWagerTransaction` passando a
+  inbox `(consumerName, messageId, payloadHash)`. A linha da inbox entra **no mesmo
+  commit** da transação, do saldo, do ledger e da outbox.
+- **Ack só depois do commit:** `DeleteMessage` vem depois de `execute` retornar. Se o
+  processo morrer entre os dois, a mensagem volta quando a visibilidade vence, é achada
+  na inbox (`DUPLICATE`) e só é apagada. Teste: "worker morto depois do commit e antes do
+  ack".
+- **Classificação de erros:**
+
+  | Tipo | Exemplos | O que acontece |
+  | --- | --- | --- |
+  | Negócio | REJECTED, PENDING_REFERENCE | ack (é um resultado, não um erro) |
+  | Permanente | JSON inválido, campo faltando, carteira inexistente, conflito de idempotência, mesmo `messageId` com outro conteúdo | direto para a DLQ |
+  | Transitório | `WALLET_BUSY`, banco fora, erro inesperado | volta à fila com backoff (`ChangeMessageVisibility`, 2^(n−1) × base, até 300 s) |
+
+- **Limite de tentativas:** no recebimento `CONSUMER_MAX_ATTEMPTS` (5) com falha
+  transitória, o consumidor grava a transação como **FAILED** (`PROCESSING_FAILED`,
+  melhor esforço: só se a carteira existe e a operação não tem registro) e move a
+  mensagem para a DLQ. A DLQ recebe o corpo original com `errorCode`, `errorMessage`,
+  `receiveCount` e `consumer` nos atributos; a mensagem só sai da fila de entrada depois
+  que a DLQ aceitou.
+- **SIGTERM:** o Nest chama `beforeApplicationShutdown`; o worker para de buscar, aborta o
+  long polling, deixa a mensagem em andamento terminar (ack depois do commit) e devolve
+  com visibilidade 0 as que vieram no lote e não começaram. O container usa `init: true`
+  para o sinal chegar ao Bun (sai com 143). Se o processo morrer sem esse caminho, nada se
+  perde: o que não teve ack volta quando a visibilidade vence.
+- **Várias instâncias:** cada uma roda o seu consumidor; a visibilidade do SQS e a inbox
+  garantem que cada mensagem tem efeito uma vez (teste com 3 instâncias e duplicatas).
+
+## Referências fora de ordem
+
+- **Liberação imediata:** quando uma transação termina, as `PENDING_REFERENCE` da **mesma
+  carteira** que esperavam por ela são processadas no mesmo commit (`settle`, em cascata
+  até 5 níveis: um ROLLBACK de um REFUND que espera uma BET resolve tudo quando a BET
+  chega).
+- **Worker** (`RetryPendingReferences`, um loop por instância): pega as pendências com
+  `next_reference_check_at` vencido, **sem lock**; para cada uma abre uma transação,
+  trava a carteira e relê a transação. Se outra instância já tratou, pula. Mesma ordem de
+  lock do resto do sistema (carteira primeiro), então sem deadlock.
+- **Backoff e limite:** 1 s dobrando até 60 s, 10 tentativas (uns 5 minutos no total;
+  configurável). Justificativa: a referência normalmente chega em segundos; 5 minutos
+  cobrem reentrega da fila e retry do provedor. Esgotado o limite: **REJECTED
+  `REFERENCE_NOT_FOUND`** e evento `WagerTransactionRejected`. Reagendar não gera evento.
+- **Referência em outra carteira:** a liberação imediata não alcança (não tem o lock da
+  outra carteira); o worker resolve na próxima checagem (`REFERENCE_MISMATCH`).
+- **Replay** de uma pendência que já foi liberada devolve o estado atual (por exemplo
+  PROCESSED), não o 202 original: o estado mudou de verdade.
+
 ## Infraestrutura e operação
 
-- **Docker Compose:** `postgres` 16; `localstack` 4.4 (só SQS, fila criada por script de
+- **Docker Compose:** `postgres` 16; `localstack` 4.4 (só SQS, filas criadas por script de
   init); `migrate`, que roda as migrations uma vez e termina; `app`, que só sobe depois.
+- **Healthcheck do Postgres por TCP** (`pg_isready -h 127.0.0.1`): durante os scripts de
+  init o Postgres sobe um servidor temporário só no socket Unix, e checar pelo socket
+  liberava o `migrate` cedo demais (`ECONNREFUSED` com volume novo).
 - **Migrations nunca rodam na subida da aplicação:** com várias instâncias, todas
   tentariam migrar ao mesmo tempo.
 - **LocalStack fixado em 4.4:** versões mais novas exigem token de conta.
@@ -453,10 +525,6 @@ Desenho previsto com um IdP externo (Keycloak ou Zitadel no Compose):
 
 **Pendente nas próximas etapas:**
 
-- **Etapa 10:** consumidor SQS (`wager-transactions.fifo` e DLQ) com inbox, ack depois
-  do commit, retry/DLQ e SIGTERM; worker que reprocessa `PENDING_REFERENCE` com backoff e
-  limite (`REFERENCE_NOT_FOUND` ao esgotar). Hoje uma transação `PENDING_REFERENCE` só
-  fica gravada; quando a referência chega, nada a reprocessa ainda.
 - **Etapa 11:** logs JSON com `correlationId` e métricas; testes de crash antes do ack,
   reinício e DLQ.
 

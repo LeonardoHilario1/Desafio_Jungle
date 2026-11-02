@@ -48,6 +48,10 @@ export interface WagerTransactionState {
   processedAt: Date | null;
   /** saldo da carteira que a transação viu quando chegou no estado atual */
   observedBalance: Money | null;
+  /** quantas vezes o worker já procurou a referência sem achar */
+  referenceAttempts: number;
+  /** quando procurar a referência de novo; só em PENDING_REFERENCE */
+  nextReferenceCheckAt: Date | null;
 }
 
 export interface CreateWagerTransactionProps {
@@ -103,6 +107,8 @@ export class WagerTransaction {
     private _failureCode: TransactionFailureCode | null,
     private _processedAt: Date | null,
     private _observedBalance: Money | null,
+    private _referenceAttempts: number,
+    private _nextReferenceCheckAt: Date | null,
   ) {}
 
   /** nasce em PENDING. valida a forma e se a referência é exigida pro kind */
@@ -146,6 +152,8 @@ export class WagerTransaction {
       null,
       null,
       null,
+      0,
+      null,
     );
   }
 
@@ -175,6 +183,8 @@ export class WagerTransaction {
       null,
       props.at,
       props.money,
+      0,
+      null,
     );
   }
 
@@ -200,6 +210,8 @@ export class WagerTransaction {
       state.failureCode,
       state.processedAt,
       state.observedBalance,
+      state.referenceAttempts,
+      state.nextReferenceCheckAt,
     );
   }
 
@@ -242,6 +254,14 @@ export class WagerTransaction {
     return this._observedBalance;
   }
 
+  get referenceAttempts(): number {
+    return this._referenceAttempts;
+  }
+
+  get nextReferenceCheckAt(): Date | null {
+    return this._nextReferenceCheckAt;
+  }
+
   // ---- transições
 
   /** se a transação informou referência, o referenceTransactionId é obrigatório */
@@ -254,7 +274,8 @@ export class WagerTransaction {
     this.finish('PROCESSED', null, observedBalance, at);
   }
 
-  markPendingReference(observedBalance: Money): void {
+  /** nextCheckAt: quando o worker deve procurar a referência de novo */
+  markPendingReference(observedBalance: Money, nextCheckAt: Date): void {
     if (this._status !== 'PENDING') {
       throw new InvalidTransactionStateError(`Transação em ${this._status} não pode passar a PENDING_REFERENCE`);
     }
@@ -263,6 +284,17 @@ export class WagerTransaction {
     }
     this._status = 'PENDING_REFERENCE';
     this._observedBalance = observedBalance;
+    this._referenceAttempts = 0;
+    this._nextReferenceCheckAt = nextCheckAt;
+  }
+
+  /** mais uma tentativa sem achar a referência; continua em PENDING_REFERENCE */
+  scheduleReferenceRetry(nextCheckAt: Date): void {
+    if (this._status !== 'PENDING_REFERENCE') {
+      throw new InvalidTransactionStateError(`Transação em ${this._status} não está aguardando referência`);
+    }
+    this._referenceAttempts += 1;
+    this._nextReferenceCheckAt = nextCheckAt;
   }
 
   reject(code: FailureCode, observedBalance: Money, at: Date = new Date()): void {
@@ -323,6 +355,7 @@ export class WagerTransaction {
     this._failureCode = failureCode;
     this._observedBalance = observedBalance;
     this._processedAt = at;
+    this._nextReferenceCheckAt = null;
   }
 
   private assertOpen(): void {
