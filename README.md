@@ -127,6 +127,8 @@ docker compose exec localstack awslocal sqs receive-message \
 | GET | `/health/ready` | PostgreSQL e SQS alcançáveis (503 se não) |
 | POST | `/wallets` | cria carteira com `playerId` e `initialBalance` |
 | GET | `/wallets/:walletId` | carteira e saldo |
+| GET | `/wallets/:walletId/ledger?cursor=...&limit=50` | lançamentos da carteira, paginados por cursor |
+| POST | `/wallets/:walletId/reconciliation` | confere o saldo gravado contra o ledger |
 | POST | `/wagering/transactions` | envia BET, WIN, LOSS, REFUND ou ROLLBACK (`Idempotency-Key` obrigatório) |
 | GET | `/wagering/transactions/:transactionId` | transação pelo id interno |
 | GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | transação pelo id do provedor |
@@ -259,11 +261,11 @@ Postgres. Se o volume já existia, recrie com `docker compose down -v`.
 - ledger;
 - outbox;
 - consultas de transação;
+- ledger paginado por cursor e reconciliação de saldo;
 - testes com várias instâncias.
 
 **Próximos passos:**
 
-- ledger paginado (`GET /wallets/:id/ledger`) e reconciliação de saldo;
 - consumidor da fila `wager-transactions.fifo`, com inbox e DLQ;
 - reprocessamento automático das transações `PENDING_REFERENCE`;
 - logs estruturados e métricas.

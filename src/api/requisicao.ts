@@ -71,3 +71,36 @@ export function eventContext(correlationHeader: string | undefined, causationId?
     correlationHeader !== undefined && CORRELATION_ID_PATTERN.test(correlationHeader) ? correlationHeader : randomUUID();
   return { correlationId, ...(causationId !== undefined && { causationId }) };
 }
+
+const MAX_PAGE_SIZE = 200;
+const DEFAULT_PAGE_SIZE = 50;
+
+/** limit da paginação: inteiro de 1 a 200, padrão 50 */
+export function pageSize(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_PAGE_SIZE;
+  if (!/^\d{1,3}$/.test(raw) || Number(raw) < 1 || Number(raw) > MAX_PAGE_SIZE) {
+    throw invalid(`limit deve ser inteiro de 1 a ${MAX_PAGE_SIZE}`);
+  }
+  return Number(raw);
+}
+
+/*
+ * cursor opaco do ledger. por dentro é só a última wallet_version entregue, em base64url,
+ * mas o cliente não precisa (nem deve) saber disso. como wallet_version é única e só cresce
+ * por carteira, o cursor fica estável mesmo com lançamento novo chegando no meio.
+ */
+export function encodeCursor(afterVersion: number): string {
+  return Buffer.from(JSON.stringify({ v: afterVersion })).toString('base64url');
+}
+
+export function decodeCursor(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return 0;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    const v = (parsed as { v?: unknown }).v;
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return v;
+  } catch {
+    // cai no erro abaixo
+  }
+  throw invalid('cursor inválido');
+}

@@ -13,8 +13,11 @@ import { OutboxMessage } from '../dominio/mensagem-outbox';
 import type { WagerTransaction } from '../dominio/transacao-aposta';
 import type { OpenedWallet, Wallet } from '../dominio/carteira';
 import { isLockTimeout, isUniqueViolation } from './erros-banco';
-import { WagerTransactionRecord, WalletRecord } from './esquemas-entidades';
+import { Money } from '../dominio/dinheiro';
+import type { WalletLedgerEntry } from '../dominio/lancamento-ledger';
+import { LedgerEntryRecord, WagerTransactionRecord, WalletRecord } from './esquemas-entidades';
 import {
+  ledgerEntryFromRecord,
   transactionFromRecord,
   walletFromRecord,
   writeLedgerEntry,
@@ -105,6 +108,41 @@ class MikroOrmWageringStore implements WageringStore {
       kind: { $in: ['REFUND', 'ROLLBACK'] },
     });
     return count > 0;
+  }
+
+  async listLedger(walletId: string, afterVersion: number, limit: number): Promise<WalletLedgerEntry[]> {
+    const records = await this.em.find(
+      LedgerEntryRecord,
+      { walletId, walletVersion: { $gt: afterVersion } },
+      { orderBy: { walletVersion: 'asc' }, limit },
+    );
+    return records.map(ledgerEntryFromRecord);
+  }
+
+  async ledgerSnapshot(walletId: string) {
+    // uma query só: no READ COMMITTED cada comando vê um snapshot, então saldo e soma do
+    // ledger saem do mesmo instante, mesmo com escrita acontecendo em paralelo
+    const [row] = await this.em.getConnection().execute<
+      { currency: string; balance: string; calculated: string; entries: number }[]
+    >(
+      `select w.currency, w.balance,
+              coalesce(sum(case e.direction when 'CREDIT' then e.amount else -e.amount end), 0)::numeric(18,2)::text
+                as calculated,
+              count(e.id)::int as entries
+         from wallets w
+         left join wallet_ledger_entries e on e.wallet_id = w.id
+        where w.id = ?
+        group by w.id`,
+      [walletId],
+    );
+    if (!row) return null;
+    const money = (amount: string) => Money.from({ amount, currency: row.currency });
+    // a soma do ledger pode dar negativa se algo muito errado acontecer; Money.from não
+    // aceita sinal, então monto pelo zero
+    const calculated = row.calculated.startsWith('-')
+      ? Money.zero(row.currency).subtract(money(row.calculated.slice(1)))
+      : money(row.calculated);
+    return { stored: money(row.balance), calculated, entries: row.entries };
   }
 
   async insertWallet(opened: OpenedWallet, events: IntegrationEvent<unknown>[]): Promise<void> {

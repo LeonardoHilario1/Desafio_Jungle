@@ -2,6 +2,7 @@ import type { IntegrationEvent } from '../dominio/eventos/evento-integracao';
 import type { OpenedWallet, Wallet } from '../dominio/carteira';
 import type { WagerTransaction } from '../dominio/transacao-aposta';
 import type { WalletLedgerEntry } from '../dominio/lancamento-ledger';
+import type { Money } from '../dominio/dinheiro';
 
 /** tudo que uma transação de aposta gera e tem que ir no mesmo commit */
 export interface WagerChanges {
@@ -25,6 +26,13 @@ export interface WageringStore {
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null>;
   /** true se já tem REFUND ou ROLLBACK PROCESSED dessa referência */
   hasProcessedReversal(referenceTransactionId: string): Promise<boolean>;
+  /** lançamentos com wallet_version > afterVersion, em ordem, no máximo limit */
+  listLedger(walletId: string, afterVersion: number, limit: number): Promise<WalletLedgerEntry[]>;
+  /**
+   * saldo gravado e saldo somado do ledger, lidos no mesmo snapshot (uma query só);
+   * null se a carteira não existe
+   */
+  ledgerSnapshot(walletId: string): Promise<{ stored: Money; calculated: Money; entries: number } | null>;
   insertWallet(opened: OpenedWallet, events: IntegrationEvent<unknown>[]): Promise<void>;
   /** grava a transação (nova ou atualizada), o saldo, o lançamento e os eventos da outbox */
   saveWager(changes: WagerChanges): Promise<void>;

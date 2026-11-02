@@ -304,9 +304,20 @@ Migrations SQL escritas à mão, todas com `down`:
 | GET | `/health/ready` | `select 1` no PostgreSQL e `GetQueueUrl` da fila, timeout de 2 s; 503 com o detalhe |
 | POST | `/wallets` | `{ playerId, initialBalance: { amount, currency } }` → `{ id, playerId, balance, version, ... }` |
 | GET | `/wallets/:walletId` | carteira e saldo |
+| GET | `/wallets/:walletId/ledger?cursor=&limit=` | lançamentos em ordem de `wallet_version`; `limit` de 1 a 200 (padrão 50); `nextCursor` opaco |
+| POST | `/wallets/:walletId/reconciliation` | saldo gravado × saldo do ledger; 200 com `consistent` |
 | POST | `/wagering/transactions` | `Idempotency-Key` obrigatório; corpo do desafio → `{ transactionId, status, balance, idempotentReplay, failureCode? }` |
 | GET | `/wagering/transactions/:transactionId` | transação completa |
 | GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | transação pelo id do provedor |
+
+**Paginação do ledger:** o cursor é um base64url opaco da última `wallet_version`
+entregue. Como `wallet_version` é única por carteira e só cresce, a página seguinte nunca
+duplica nem pula itens, mesmo com lançamentos novos chegando durante a paginação; a busca
+usa o índice `UNIQUE (wallet_id, wallet_version)`.
+
+**Reconciliação:** uma única query lê o saldo gravado e soma o ledger (no mesmo snapshot,
+sem lock). Divergência não é corrigida: é logada (`warn`), contada em métrica e
+sinalizada com `consistent: false` e a `difference` (gravado − calculado).
 
 `X-Correlation-Id` (opcional) é gravado na transação e propagado aos eventos; sem ele, um
 novo é gerado.
@@ -442,7 +453,6 @@ Desenho previsto com um IdP externo (Keycloak ou Zitadel no Compose):
 
 **Pendente nas próximas etapas:**
 
-- **Etapa 9:** `GET /wallets/:id/ledger` com cursor e `POST /wallets/:id/reconciliation`.
 - **Etapa 10:** consumidor SQS (`wager-transactions.fifo` e DLQ) com inbox, ack depois
   do commit, retry/DLQ e SIGTERM; worker que reprocessa `PENDING_REFERENCE` com backoff e
   limite (`REFERENCE_NOT_FOUND` ao esgotar). Hoje uma transação `PENDING_REFERENCE` só
